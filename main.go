@@ -95,6 +95,15 @@ func main() {
 	switch cfg.Provider {
 	case "aws":
 		p, err = provider.NewAWSProvider(domainFilter, zoneIDFilter, zoneTypeFilter, cfg.AWSAssumeRole, cfg.DryRun)
+	case "aws-sd":
+		// Check that TXT registry is not used with AWS SD.
+		// Ownership information is maintained automatically in SD API using CreatorRequestId field.
+		if cfg.Registry != "noop" {
+			log.Infof("No need to use \"%s\" registry with AWS ServiceDiscovery. Switching to \"noop\".", cfg.Registry)
+			cfg.Registry = "noop"
+		}
+		namespaceTypeFilter := provider.NewNamespaceTypeFilter(cfg.AWSZoneType)
+		p, err = provider.NewAWSSDProvider(domainFilter, namespaceTypeFilter, cfg.TXTOwnerID, cfg.DryRun)
 	case "azure":
 		p, err = provider.NewAzureProvider(cfg.AzureConfigFile, domainFilter, zoneIDFilter, cfg.AzureResourceGroup, cfg.DryRun)
 	case "cloudflare":
