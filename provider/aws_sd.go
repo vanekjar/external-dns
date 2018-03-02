@@ -65,8 +65,8 @@ type AWSSDProvider struct {
 	ownerID string
 }
 
-// NewAWSProvider initializes a new AWS Route53 Auto Naming based Provider.
-func NewAWSSDProvider(domainFilter DomainFilter, namespaceTypeFilter NamespaceTypeFilter, ownerId string, dryRun bool) (*AWSSDProvider, error) {
+// NewAWSSDProvider initializes a new AWS Route53 Auto Naming based Provider.
+func NewAWSSDProvider(domainFilter DomainFilter, namespaceTypeFilter NamespaceTypeFilter, ownerID string, dryRun bool) (*AWSSDProvider, error) {
 	config := aws.NewConfig()
 
 	config = config.WithHTTPClient(
@@ -90,14 +90,15 @@ func NewAWSSDProvider(domainFilter DomainFilter, namespaceTypeFilter NamespaceTy
 	provider := &AWSSDProvider{
 		client:              sd.New(sess),
 		namespaceFilter:     domainFilter,
-		namespaceTypeFilter: namespaceTypeFilter.toAwsApiRequestFilter(),
+		namespaceTypeFilter: namespaceTypeFilter.toAwsAPIRequestFilter(),
 		dryRun:              dryRun,
-		ownerID:             ownerId,
+		ownerID:             ownerID,
 	}
 
 	return provider, nil
 }
 
+// Records returns list of all endpoints.
 func (p *AWSSDProvider) Records() (endpoints []*endpoint.Endpoint, err error) {
 	namespaces, err := p.ListNamespaces()
 	if err != nil {
@@ -105,13 +106,13 @@ func (p *AWSSDProvider) Records() (endpoints []*endpoint.Endpoint, err error) {
 	}
 
 	for _, ns := range namespaces {
-		services, err := p.ListServicesByNamespaceId(ns.Id)
+		services, err := p.ListServicesByNamespaceID(ns.Id)
 		if err != nil {
 			return nil, err
 		}
 
 		for _, srv := range services {
-			instances, err := p.ListInstancesByServiceId(srv.Id)
+			instances, err := p.ListInstancesByServiceID(srv.Id)
 			if err != nil {
 				return nil, err
 			}
@@ -161,6 +162,7 @@ func (p *AWSSDProvider) instancesToEndpoint(recordName string, srv *sd.Service, 
 	return newEndpoint, nil
 }
 
+// ApplyChanges applies Kubernetes changes in endpoints to AWS API
 func (p *AWSSDProvider) ApplyChanges(changes *plan.Changes) error {
 	// return early if there is nothing to change
 	if len(changes.Create) == 0 && len(changes.Delete) == 0 && len(changes.UpdateNew) == 0 {
@@ -208,10 +210,10 @@ func (p *AWSSDProvider) updatesToCreates(changes *plan.Changes) (creates []*endp
 }
 
 func (p *AWSSDProvider) submitCreates(namespaces []*sd.NamespaceSummary, changes []*endpoint.Endpoint) error {
-	changesByNamespaceId := p.changesByNamespaceId(namespaces, changes)
+	changesByNamespaceID := p.changesByNamespaceID(namespaces, changes)
 
-	for nsId, changeList := range changesByNamespaceId {
-		services, err := p.ListServicesByNamespaceId(aws.String(nsId))
+	for nsID, changeList := range changesByNamespaceID {
+		services, err := p.ListServicesByNamespaceID(aws.String(nsID))
 		if err != nil {
 			return err
 		}
@@ -223,19 +225,19 @@ func (p *AWSSDProvider) submitCreates(namespaces []*sd.NamespaceSummary, changes
 			summary := serviceToServiceSummary(srv)
 			if srv == nil {
 				// when service is missing create a new one
-				summary, err = p.CreateService(&nsId, &srvName, ch)
+				summary, err = p.CreateService(&nsID, &srvName, ch)
 				if err != nil {
 					return err
 				}
 				// update local list of services
-				services, err = p.ListServicesByNamespaceId(aws.String(nsId))
+				services, err = p.ListServicesByNamespaceID(aws.String(nsID))
 				if err != nil {
 					return err
 				}
 			} else {
 				// update service TTL when differs
 				if ch.RecordTTL.IsConfigured() && *srv.DnsConfig.DnsRecords[0].TTL != int64(ch.RecordTTL) {
-					err := p.UpdateService(srv, ch)
+					err = p.UpdateService(srv, ch)
 					if err != nil {
 						return err
 					}
@@ -253,10 +255,10 @@ func (p *AWSSDProvider) submitCreates(namespaces []*sd.NamespaceSummary, changes
 }
 
 func (p *AWSSDProvider) submitDeletes(namespaces []*sd.NamespaceSummary, changes []*endpoint.Endpoint) error {
-	changesByNamespaceId := p.changesByNamespaceId(namespaces, changes)
+	changesByNamespaceID := p.changesByNamespaceID(namespaces, changes)
 
-	for nsId, changeList := range changesByNamespaceId {
-		services, err := p.ListServicesByNamespaceId(aws.String(nsId))
+	for nsID, changeList := range changesByNamespaceID {
+		services, err := p.ListServicesByNamespaceID(aws.String(nsID))
 		if err != nil {
 			return err
 		}
@@ -280,6 +282,7 @@ func (p *AWSSDProvider) submitDeletes(namespaces []*sd.NamespaceSummary, changes
 	return nil
 }
 
+// ListNamespaces returns all namespaces matching defined namespace filter
 func (p *AWSSDProvider) ListNamespaces() ([]*sd.NamespaceSummary, error) {
 	namespaces := make([]*sd.NamespaceSummary, 0)
 
@@ -304,8 +307,8 @@ func (p *AWSSDProvider) ListNamespaces() ([]*sd.NamespaceSummary, error) {
 	return namespaces, nil
 }
 
-// returns map[srv_name]*sd.Service
-func (p *AWSSDProvider) ListServicesByNamespaceId(namespaceId *string) (map[string]*sd.Service, error) {
+// ListServicesByNamespaceID returns list of services in given namespace. Returns map[srv_name]*sd.Service
+func (p *AWSSDProvider) ListServicesByNamespaceID(namespaceID *string) (map[string]*sd.Service, error) {
 	serviceIds := make([]*string, 0)
 
 	f := func(resp *sd.ListServicesOutput, lastPage bool) bool {
@@ -319,7 +322,7 @@ func (p *AWSSDProvider) ListServicesByNamespaceId(namespaceId *string) (map[stri
 	err := p.client.ListServicesPages(&sd.ListServicesInput{
 		Filters: []*sd.ServiceFilter{{
 			Name:   aws.String(sd.ServiceFilterNameNamespaceId),
-			Values: []*string{namespaceId},
+			Values: []*string{namespaceID},
 		}},
 	}, f)
 	if err != nil {
@@ -328,9 +331,9 @@ func (p *AWSSDProvider) ListServicesByNamespaceId(namespaceId *string) (map[stri
 
 	// get detail of each listed service
 	services := make(map[string]*sd.Service)
-	for _, serviceId := range serviceIds {
+	for _, serviceID := range serviceIds {
 		output, err := p.client.GetService(&sd.GetServiceInput{
-			Id: serviceId,
+			Id: serviceID,
 		})
 		if err != nil {
 			return nil, err
@@ -349,7 +352,8 @@ func (p *AWSSDProvider) ListServicesByNamespaceId(namespaceId *string) (map[stri
 	return services, nil
 }
 
-func (p *AWSSDProvider) ListInstancesByServiceId(serviceId *string) ([]*sd.InstanceSummary, error) {
+// ListInstancesByServiceID returns list of instances registered in given service.
+func (p *AWSSDProvider) ListInstancesByServiceID(serviceID *string) ([]*sd.InstanceSummary, error) {
 	instances := make([]*sd.InstanceSummary, 0)
 
 	f := func(resp *sd.ListInstancesOutput, lastPage bool) bool {
@@ -359,7 +363,7 @@ func (p *AWSSDProvider) ListInstancesByServiceId(serviceId *string) ([]*sd.Insta
 	}
 
 	err := p.client.ListInstancesPages(&sd.ListInstancesInput{
-		ServiceId: serviceId,
+		ServiceId: serviceID,
 	}, f)
 	if err != nil {
 		return nil, err
@@ -368,8 +372,9 @@ func (p *AWSSDProvider) ListInstancesByServiceId(serviceId *string) ([]*sd.Insta
 	return instances, nil
 }
 
-func (p *AWSSDProvider) CreateService(namespaceId *string, srvName *string, ep *endpoint.Endpoint) (*sd.ServiceSummary, error) {
-	log.Infof("Creating a new service \"%s\" in \"%s\" namespace", *srvName, *namespaceId)
+// CreateService creates a new service in AWS API. Returns the created service summary.
+func (p *AWSSDProvider) CreateService(namespaceID *string, srvName *string, ep *endpoint.Endpoint) (*sd.ServiceSummary, error) {
+	log.Infof("Creating a new service \"%s\" in \"%s\" namespace", *srvName, *namespaceID)
 
 	srvType := p.serviceTypeFromEndpoint(ep)
 	routingPolicy := p.routingPolicyFromEndpoint(ep)
@@ -385,7 +390,7 @@ func (p *AWSSDProvider) CreateService(namespaceId *string, srvName *string, ep *
 			Description:      aws.String(strings.Replace(sdServiceDescription, "<owner-id>", p.ownerID, 1)),
 			CreatorRequestId: aws.String(p.ownerID),
 			DnsConfig: &sd.DnsConfig{
-				NamespaceId:   namespaceId,
+				NamespaceId:   namespaceID,
 				RoutingPolicy: aws.String(routingPolicy),
 				DnsRecords: []*sd.DnsRecord{{
 					Type: aws.String(srvType),
@@ -404,6 +409,7 @@ func (p *AWSSDProvider) CreateService(namespaceId *string, srvName *string, ep *
 	return &sd.ServiceSummary{Id: aws.String("dry-run-service"), Name: aws.String("dry-run-service")}, nil
 }
 
+// UpdateService updates the specified service with information from provided endpoint.
 func (p *AWSSDProvider) UpdateService(service *sd.Service, ep *endpoint.Endpoint) error {
 	log.Infof("Updating service \"%s\" with TTL set to \"%d\"", *service.Name, ep.RecordTTL)
 
@@ -432,6 +438,7 @@ func (p *AWSSDProvider) UpdateService(service *sd.Service, ep *endpoint.Endpoint
 	return nil
 }
 
+// RegisterInstance creates a new instance in given service.
 func (p *AWSSDProvider) RegisterInstance(service *sd.ServiceSummary, ep *endpoint.Endpoint) error {
 	for _, target := range ep.Targets {
 		log.Infof("Registering a new instance \"%s\" for service \"%s\" (%s)", target, *service.Name, *service.Id)
@@ -454,7 +461,7 @@ func (p *AWSSDProvider) RegisterInstance(service *sd.ServiceSummary, ep *endpoin
 			_, err := p.client.RegisterInstance(&sd.RegisterInstanceInput{
 				ServiceId:  service.Id,
 				Attributes: attr,
-				InstanceId: aws.String(p.targetToInstanceId(target)),
+				InstanceId: aws.String(p.targetToInstanceID(target)),
 			})
 			if err != nil {
 				return err
@@ -465,13 +472,14 @@ func (p *AWSSDProvider) RegisterInstance(service *sd.ServiceSummary, ep *endpoin
 	return nil
 }
 
+// DeregisterInstance removes an instance from given service.
 func (p *AWSSDProvider) DeregisterInstance(service *sd.ServiceSummary, ep *endpoint.Endpoint) error {
 	for _, target := range ep.Targets {
 		log.Infof("De-registering an instance \"%s\" for service \"%s\" (%s)", target, *service.Name, *service.Id)
 
 		if !p.dryRun {
 			_, err := p.client.DeregisterInstance(&sd.DeregisterInstanceInput{
-				InstanceId: aws.String(p.targetToInstanceId(target)),
+				InstanceId: aws.String(p.targetToInstanceID(target)),
 				ServiceId:  service.Id,
 			})
 			if err != nil {
@@ -485,7 +493,7 @@ func (p *AWSSDProvider) DeregisterInstance(service *sd.ServiceSummary, ep *endpo
 
 // Instance ID length is limited by AWS API to 64 characters. For longer strings SHA-256 hash will be used instead of
 // the verbatim target to limit the length.
-func (p *AWSSDProvider) targetToInstanceId(target string) string {
+func (p *AWSSDProvider) targetToInstanceID(target string) string {
 	if len(target) > 64 {
 		hash := sha256.Sum256([]byte(strings.ToLower(target)))
 		return hex.EncodeToString(hash[:])
@@ -494,6 +502,8 @@ func (p *AWSSDProvider) targetToInstanceId(target string) string {
 	return strings.ToLower(target)
 }
 
+// nolint: deadcode
+// used from unit test
 func namespaceToNamespaceSummary(namespace *sd.Namespace) *sd.NamespaceSummary {
 	if namespace == nil {
 		return nil
@@ -521,6 +531,8 @@ func serviceToServiceSummary(service *sd.Service) *sd.ServiceSummary {
 	}
 }
 
+// nolint: deadcode
+// used from unit test
 func instanceToInstanceSummary(instance *sd.Instance) *sd.InstanceSummary {
 	if instance == nil {
 		return nil
@@ -532,11 +544,11 @@ func instanceToInstanceSummary(instance *sd.Instance) *sd.InstanceSummary {
 	}
 }
 
-func (p *AWSSDProvider) changesByNamespaceId(namespaces []*sd.NamespaceSummary, changes []*endpoint.Endpoint) map[string][]*endpoint.Endpoint {
-	changesByNsId := make(map[string][]*endpoint.Endpoint)
+func (p *AWSSDProvider) changesByNamespaceID(namespaces []*sd.NamespaceSummary, changes []*endpoint.Endpoint) map[string][]*endpoint.Endpoint {
+	changesByNsID := make(map[string][]*endpoint.Endpoint)
 
 	for _, ns := range namespaces {
-		changesByNsId[*ns.Id] = []*endpoint.Endpoint{}
+		changesByNsID[*ns.Id] = []*endpoint.Endpoint{}
 	}
 
 	for _, c := range changes {
@@ -550,18 +562,18 @@ func (p *AWSSDProvider) changesByNamespaceId(namespaces []*sd.NamespaceSummary, 
 			continue
 		}
 		for _, ns := range matchingNamespaces {
-			changesByNsId[*ns.Id] = append(changesByNsId[*ns.Id], c)
+			changesByNsID[*ns.Id] = append(changesByNsID[*ns.Id], c)
 		}
 	}
 
 	// separating a change could lead to empty sub changes, remove them here.
-	for zone, change := range changesByNsId {
+	for zone, change := range changesByNsID {
 		if len(change) == 0 {
-			delete(changesByNsId, zone)
+			delete(changesByNsID, zone)
 		}
 	}
 
-	return changesByNsId
+	return changesByNsID
 }
 
 // returns list of all namespaces matching given hostname

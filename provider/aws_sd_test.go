@@ -133,9 +133,9 @@ func (s *AWSServiceDiscoveryAPIStub) ListServicesPages(input *sd.ListServicesInp
 	if filter == nil || *filter.Name != sd.ServiceFilterNameNamespaceId {
 		return errors.New("missing namespace filter")
 	}
-	nsId := filter.Values[0]
+	nsID := filter.Values[0]
 
-	for _, srv := range s.services[*nsId] {
+	for _, srv := range s.services[*nsID] {
 		services = append(services, serviceToServiceSummary(srv))
 	}
 
@@ -178,12 +178,12 @@ func (s *AWSServiceDiscoveryAPIStub) UpdateService(input *sd.UpdateServiceInput)
 	return &sd.UpdateServiceOutput{}, nil
 }
 
-func newAWSSDProvider(api AWSServiceDiscoveryAPI, domainFilter DomainFilter, namespaceTypeFilter NamespaceTypeFilter, ownerId string) *AWSSDProvider {
+func newAWSSDProvider(api AWSServiceDiscoveryAPI, domainFilter DomainFilter, namespaceTypeFilter NamespaceTypeFilter, ownerID string) *AWSSDProvider {
 	return &AWSSDProvider{
 		client:              api,
 		namespaceFilter:     domainFilter,
-		namespaceTypeFilter: namespaceTypeFilter.toAwsApiRequestFilter(),
-		ownerID:             ownerId,
+		namespaceTypeFilter: namespaceTypeFilter.toAwsAPIRequestFilter(),
+		ownerID:             ownerID,
 		dryRun:              false,
 	}
 }
@@ -323,7 +323,7 @@ func TestAWSSDProvider_ApplyChanges(t *testing.T) {
 
 	// make sure services were created
 	assert.Len(t, api.services["private"], 3)
-	existingServices, _ := provider.ListServicesByNamespaceId(namespaces["private"].Id)
+	existingServices, _ := provider.ListServicesByNamespaceID(namespaces["private"].Id)
 	assert.NotNil(t, existingServices["service1"])
 	assert.NotNil(t, existingServices["service2"])
 	assert.NotNil(t, existingServices["service3"])
@@ -433,11 +433,11 @@ func TestAWSSDProvider_ListServicesByNamespace(t *testing.T) {
 	} {
 		provider := newAWSSDProvider(api, NewDomainFilter([]string{}), NewNamespaceTypeFilter(""), tc.ownerFilter)
 
-		result, err := provider.ListServicesByNamespaceId(namespaces["private"].Id)
+		result, err := provider.ListServicesByNamespaceID(namespaces["private"].Id)
 		require.NoError(t, err)
 
 		if !reflect.DeepEqual(result, tc.expectedServices) {
-			t.Errorf("AWSSDProvider.ListServicesByNamespaceId() error = %v, wantErr %v", result, tc.expectedServices)
+			t.Errorf("AWSSDProvider.ListServicesByNamespaceID() error = %v, wantErr %v", result, tc.expectedServices)
 		}
 	}
 }
@@ -491,13 +491,13 @@ func TestAWSSDProvider_ListInstancesByService(t *testing.T) {
 
 	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), NewNamespaceTypeFilter(""), "")
 
-	result, err := provider.ListInstancesByServiceId(services["private"]["srv1"].Id)
+	result, err := provider.ListInstancesByServiceID(services["private"]["srv1"].Id)
 	require.NoError(t, err)
 
 	expectedInstances := []*sd.InstanceSummary{instanceToInstanceSummary(instances["srv1"]["inst1"]), instanceToInstanceSummary(instances["srv1"]["inst2"])}
 
 	if !reflect.DeepEqual(result, expectedInstances) {
-		t.Errorf("AWSSDProvider.ListInstancesByServiceId() error = %v, wantErr %v", result, expectedInstances)
+		t.Errorf("AWSSDProvider.ListInstancesByServiceID() error = %v, wantErr %v", result, expectedInstances)
 	}
 }
 

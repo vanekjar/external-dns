@@ -81,6 +81,6 @@ func TestZoneTypeFilterToAwsApiRequestFilter(t *testing.T) {
 		},
 	} {
 		namespaceTypeFilter := NewNamespaceTypeFilter(tc.namespaceTypeFilter)
-		assert.Equal(t, tc.awsFilter, namespaceTypeFilter.toAwsApiRequestFilter())
+		assert.Equal(t, tc.awsFilter, namespaceTypeFilter.toAwsAPIRequestFilter())
 	}
 }

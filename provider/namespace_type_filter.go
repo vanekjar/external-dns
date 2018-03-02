@@ -56,7 +56,7 @@ func (f *NamespaceTypeFilter) Match(namespace *sd.Namespace) bool {
 }
 
 // convert NamespaceTypeFilter to API request filter
-func (f *NamespaceTypeFilter) toAwsApiRequestFilter() *sd.NamespaceFilter {
+func (f *NamespaceTypeFilter) toAwsAPIRequestFilter() *sd.NamespaceFilter {
 	switch f.namespaceType {
 	case namespaceTypePublic:
 		return &sd.NamespaceFilter{
