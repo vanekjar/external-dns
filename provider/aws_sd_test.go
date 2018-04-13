@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+Copyright 2018 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -178,11 +178,11 @@ func (s *AWSServiceDiscoveryAPIStub) UpdateService(input *sd.UpdateServiceInput)
 	return &sd.UpdateServiceOutput{}, nil
 }
 
-func newAWSSDProvider(api AWSServiceDiscoveryAPI, domainFilter DomainFilter, namespaceTypeFilter NamespaceTypeFilter, ownerID string) *AWSSDProvider {
+func newAWSSDProvider(api AWSServiceDiscoveryAPI, domainFilter DomainFilter, namespaceTypeFilter string, ownerID string) *AWSSDProvider {
 	return &AWSSDProvider{
 		client:              api,
 		namespaceFilter:     domainFilter,
-		namespaceTypeFilter: namespaceTypeFilter.toAwsAPIRequestFilter(),
+		namespaceTypeFilter: newSdNamespaceFilter(namespaceTypeFilter),
 		ownerID:             ownerID,
 		dryRun:              false,
 	}
@@ -246,13 +246,13 @@ func TestAWSSDProvider_Records(t *testing.T) {
 			"1.2.3.4": {
 				Id: aws.String("1.2.3.4"),
 				Attributes: map[string]*string{
-					"AWS_INSTANCE_IPV4": aws.String("1.2.3.4"),
+					sdInstanceAttrIPV4: aws.String("1.2.3.4"),
 				},
 			},
 			"1.2.3.5": {
 				Id: aws.String("1.2.3.5"),
 				Attributes: map[string]*string{
-					"AWS_INSTANCE_IPV4": aws.String("1.2.3.5"),
+					sdInstanceAttrIPV4: aws.String("1.2.3.5"),
 				},
 			},
 		},
@@ -260,7 +260,7 @@ func TestAWSSDProvider_Records(t *testing.T) {
 			"load-balancer.us-east-1.elb.amazonaws.com": {
 				Id: aws.String("load-balancer.us-east-1.elb.amazonaws.com"),
 				Attributes: map[string]*string{
-					"AWS_ALIAS_DNS_NAME": aws.String("load-balancer.us-east-1.elb.amazonaws.com"),
+					sdInstanceAttrAlias: aws.String("load-balancer.us-east-1.elb.amazonaws.com"),
 				},
 			},
 		},
@@ -268,7 +268,7 @@ func TestAWSSDProvider_Records(t *testing.T) {
 			"cname.target.com": {
 				Id: aws.String("cname.target.com"),
 				Attributes: map[string]*string{
-					"AWS_INSTANCE_CNAME": aws.String("cname.target.com"),
+					sdInstanceAttrCname: aws.String("cname.target.com"),
 				},
 			},
 		},
@@ -286,7 +286,7 @@ func TestAWSSDProvider_Records(t *testing.T) {
 		instances:  instances,
 	}
 
-	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), NewNamespaceTypeFilter(""), "")
+	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), "", "")
 
 	endpoints, _ := provider.Records()
 
@@ -314,7 +314,7 @@ func TestAWSSDProvider_ApplyChanges(t *testing.T) {
 		{DNSName: "service3.private.com", Targets: endpoint.Targets{"cname.target.com"}, RecordType: endpoint.RecordTypeCNAME, RecordTTL: 100},
 	}
 
-	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), NewNamespaceTypeFilter(""), "")
+	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), "", "")
 
 	// apply creates
 	provider.ApplyChanges(&plan.Changes{
@@ -363,20 +363,29 @@ func TestAWSSDProvider_ListNamespaces(t *testing.T) {
 	for _, tc := range []struct {
 		msg                 string
 		domainFilter        DomainFilter
-		namespaceTypeFilter NamespaceTypeFilter
+		namespaceTypeFilter string
 		expectedNamespaces  []*sd.NamespaceSummary
 	}{
-		{"public filter", NewDomainFilter([]string{}), NewNamespaceTypeFilter("public"), []*sd.NamespaceSummary{namespaceToNamespaceSummary(namespaces["public"])}},
-		{"private filter", NewDomainFilter([]string{}), NewNamespaceTypeFilter("private"), []*sd.NamespaceSummary{namespaceToNamespaceSummary(namespaces["private"])}},
-		{"domain filter", NewDomainFilter([]string{"public.com"}), NewNamespaceTypeFilter(""), []*sd.NamespaceSummary{namespaceToNamespaceSummary(namespaces["public"])}},
-		{"non-existing domain", NewDomainFilter([]string{"xxx.com"}), NewNamespaceTypeFilter(""), []*sd.NamespaceSummary{}},
+		{"public filter", NewDomainFilter([]string{}), "public", []*sd.NamespaceSummary{namespaceToNamespaceSummary(namespaces["public"])}},
+		{"private filter", NewDomainFilter([]string{}), "private", []*sd.NamespaceSummary{namespaceToNamespaceSummary(namespaces["private"])}},
+		{"domain filter", NewDomainFilter([]string{"public.com"}), "", []*sd.NamespaceSummary{namespaceToNamespaceSummary(namespaces["public"])}},
+		{"non-existing domain", NewDomainFilter([]string{"xxx.com"}), "", []*sd.NamespaceSummary{}},
 	} {
 		provider := newAWSSDProvider(api, tc.domainFilter, tc.namespaceTypeFilter, "")
 
 		result, err := provider.ListNamespaces()
 		require.NoError(t, err)
 
-		if !reflect.DeepEqual(result, tc.expectedNamespaces) {
+		expectedMap := make(map[string]*sd.NamespaceSummary)
+		resultMap := make(map[string]*sd.NamespaceSummary)
+		for _, ns := range tc.expectedNamespaces {
+			expectedMap[*ns.Id] = ns
+		}
+		for _, ns := range result {
+			resultMap[*ns.Id] = ns
+		}
+
+		if !reflect.DeepEqual(resultMap, expectedMap) {
 			t.Errorf("AWSSDProvider.ListNamespaces() error = %v, wantErr %v", result, tc.expectedNamespaces)
 		}
 	}
@@ -431,7 +440,7 @@ func TestAWSSDProvider_ListServicesByNamespace(t *testing.T) {
 		{"owner filter", "owner1", map[string]*sd.Service{"service1": services["private"]["srv1"]}},
 		{"no filter", "", map[string]*sd.Service{"service1": services["private"]["srv1"], "service2": services["private"]["srv2"]}},
 	} {
-		provider := newAWSSDProvider(api, NewDomainFilter([]string{}), NewNamespaceTypeFilter(""), tc.ownerFilter)
+		provider := newAWSSDProvider(api, NewDomainFilter([]string{}), "", tc.ownerFilter)
 
 		result, err := provider.ListServicesByNamespaceID(namespaces["private"].Id)
 		require.NoError(t, err)
@@ -471,13 +480,13 @@ func TestAWSSDProvider_ListInstancesByService(t *testing.T) {
 			"inst1": {
 				Id: aws.String("inst1"),
 				Attributes: map[string]*string{
-					"AWS_INSTANCE_IPV4": aws.String("1.2.3.4"),
+					sdInstanceAttrIPV4: aws.String("1.2.3.4"),
 				},
 			},
 			"inst2": {
 				Id: aws.String("inst2"),
 				Attributes: map[string]*string{
-					"AWS_INSTANCE_IPV4": aws.String("1.2.3.5"),
+					sdInstanceAttrIPV4: aws.String("1.2.3.5"),
 				},
 			},
 		},
@@ -489,14 +498,23 @@ func TestAWSSDProvider_ListInstancesByService(t *testing.T) {
 		instances:  instances,
 	}
 
-	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), NewNamespaceTypeFilter(""), "")
+	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), "", "")
 
 	result, err := provider.ListInstancesByServiceID(services["private"]["srv1"].Id)
 	require.NoError(t, err)
 
 	expectedInstances := []*sd.InstanceSummary{instanceToInstanceSummary(instances["srv1"]["inst1"]), instanceToInstanceSummary(instances["srv1"]["inst2"])}
 
-	if !reflect.DeepEqual(result, expectedInstances) {
+	expectedMap := make(map[string]*sd.InstanceSummary)
+	resultMap := make(map[string]*sd.InstanceSummary)
+	for _, inst := range expectedInstances {
+		expectedMap[*inst.Id] = inst
+	}
+	for _, inst := range result {
+		resultMap[*inst.Id] = inst
+	}
+
+	if !reflect.DeepEqual(resultMap, expectedMap) {
 		t.Errorf("AWSSDProvider.ListInstancesByServiceID() error = %v, wantErr %v", result, expectedInstances)
 	}
 }
@@ -517,7 +535,7 @@ func TestAWSSDProvider_CreateService(t *testing.T) {
 
 	expectedServices := make(map[string]*sd.Service)
 
-	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), NewNamespaceTypeFilter(""), "owner-id")
+	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), "", "owner-id")
 
 	// A type
 	provider.CreateService(aws.String("private"), aws.String("A-srv"), &endpoint.Endpoint{
@@ -576,18 +594,18 @@ func TestAWSSDProvider_CreateService(t *testing.T) {
 		},
 	}
 
-	validateAWSSDServices(t, expectedServices, api.services["private"])
+	validateAWSSDServicesMapsEqual(t, expectedServices, api.services["private"])
 }
 
-func validateAWSSDServices(t *testing.T, expected map[string]*sd.Service, services map[string]*sd.Service) {
+func validateAWSSDServicesMapsEqual(t *testing.T, expected map[string]*sd.Service, services map[string]*sd.Service) {
 	require.Len(t, services, len(expected))
 
 	for _, srv := range services {
-		validateAWSSDServiceEquals(t, expected[*srv.Name], srv)
+		validateAWSSDServicesEqual(t, expected[*srv.Name], srv)
 	}
 }
 
-func validateAWSSDServiceEquals(t *testing.T, expected *sd.Service, srv *sd.Service) {
+func validateAWSSDServicesEqual(t *testing.T, expected *sd.Service, srv *sd.Service) {
 	assert.Equal(t, *expected.CreatorRequestId, *srv.CreatorRequestId)
 	assert.Equal(t, *expected.Name, *srv.Name)
 	assert.True(t, reflect.DeepEqual(*expected.DnsConfig, *srv.DnsConfig))
@@ -625,7 +643,7 @@ func TestAWSSDProvider_UpdateService(t *testing.T) {
 		services:   services,
 	}
 
-	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), NewNamespaceTypeFilter(""), "owner-id")
+	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), "", "owner-id")
 
 	// update service with different TTL
 	provider.UpdateService(services["private"]["srv1"], &endpoint.Endpoint{
@@ -692,12 +710,12 @@ func TestAWSSDProvider_RegisterInstance(t *testing.T) {
 		instances:  make(map[string]map[string]*sd.Instance),
 	}
 
-	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), NewNamespaceTypeFilter(""), "")
+	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), "", "")
 
 	expectedInstances := make(map[string]*sd.Instance)
 
 	// IP-based instance
-	provider.RegisterInstance(serviceToServiceSummary(services["private"]["a-srv"]), &endpoint.Endpoint{
+	provider.RegisterInstance(services["private"]["a-srv"], &endpoint.Endpoint{
 		RecordType: endpoint.RecordTypeA,
 		DNSName:    "service1.private.com.",
 		RecordTTL:  300,
@@ -706,18 +724,18 @@ func TestAWSSDProvider_RegisterInstance(t *testing.T) {
 	expectedInstances["1.2.3.4"] = &sd.Instance{
 		Id: aws.String("1.2.3.4"),
 		Attributes: map[string]*string{
-			"AWS_INSTANCE_IPV4": aws.String("1.2.3.4"),
+			sdInstanceAttrIPV4: aws.String("1.2.3.4"),
 		},
 	}
 	expectedInstances["1.2.3.5"] = &sd.Instance{
 		Id: aws.String("1.2.3.5"),
 		Attributes: map[string]*string{
-			"AWS_INSTANCE_IPV4": aws.String("1.2.3.5"),
+			sdInstanceAttrIPV4: aws.String("1.2.3.5"),
 		},
 	}
 
 	// ALIAS instance
-	provider.RegisterInstance(serviceToServiceSummary(services["private"]["alias-srv"]), &endpoint.Endpoint{
+	provider.RegisterInstance(services["private"]["alias-srv"], &endpoint.Endpoint{
 		RecordType: endpoint.RecordTypeCNAME,
 		DNSName:    "service1.private.com.",
 		RecordTTL:  300,
@@ -726,18 +744,18 @@ func TestAWSSDProvider_RegisterInstance(t *testing.T) {
 	expectedInstances["load-balancer.us-east-1.elb.amazonaws.com"] = &sd.Instance{
 		Id: aws.String("load-balancer.us-east-1.elb.amazonaws.com"),
 		Attributes: map[string]*string{
-			"AWS_ALIAS_DNS_NAME": aws.String("load-balancer.us-east-1.elb.amazonaws.com"),
+			sdInstanceAttrAlias: aws.String("load-balancer.us-east-1.elb.amazonaws.com"),
 		},
 	}
 	expectedInstances["load-balancer.us-west-2.elb.amazonaws.com"] = &sd.Instance{
 		Id: aws.String("load-balancer.us-west-2.elb.amazonaws.com"),
 		Attributes: map[string]*string{
-			"AWS_ALIAS_DNS_NAME": aws.String("load-balancer.us-west-2.elb.amazonaws.com"),
+			sdInstanceAttrAlias: aws.String("load-balancer.us-west-2.elb.amazonaws.com"),
 		},
 	}
 
 	// CNAME instance
-	provider.RegisterInstance(serviceToServiceSummary(services["private"]["cname-srv"]), &endpoint.Endpoint{
+	provider.RegisterInstance(services["private"]["cname-srv"], &endpoint.Endpoint{
 		RecordType: endpoint.RecordTypeCNAME,
 		DNSName:    "service2.private.com.",
 		RecordTTL:  300,
@@ -746,7 +764,7 @@ func TestAWSSDProvider_RegisterInstance(t *testing.T) {
 	expectedInstances["cname.target.com"] = &sd.Instance{
 		Id: aws.String("cname.target.com"),
 		Attributes: map[string]*string{
-			"AWS_INSTANCE_CNAME": aws.String("cname.target.com"),
+			sdInstanceAttrCname: aws.String("cname.target.com"),
 		},
 	}
 
@@ -784,7 +802,7 @@ func TestAWSSDProvider_DeregisterInstance(t *testing.T) {
 			"1.2.3.4": {
 				Id: aws.String("inst1"),
 				Attributes: map[string]*string{
-					"AWS_INSTANCE_IPV4": aws.String("1.2.3.4"),
+					sdInstanceAttrIPV4: aws.String("1.2.3.4"),
 				},
 			},
 		},
@@ -796,9 +814,9 @@ func TestAWSSDProvider_DeregisterInstance(t *testing.T) {
 		instances:  instances,
 	}
 
-	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), NewNamespaceTypeFilter(""), "")
+	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), "", "")
 
-	provider.DeregisterInstance(serviceToServiceSummary(services["private"]["srv1"]), endpoint.NewEndpoint("srv1.private.com.", "1.2.3.4", endpoint.RecordTypeA))
+	provider.DeregisterInstance(services["private"]["srv1"], endpoint.NewEndpoint("srv1.private.com.", "1.2.3.4", endpoint.RecordTypeA))
 
 	assert.Len(t, instances["srv1"], 0)
 }

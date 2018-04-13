@@ -102,8 +102,7 @@ func main() {
 			log.Infof("No need to use \"%s\" registry with AWS ServiceDiscovery. Switching to \"noop\".", cfg.Registry)
 			cfg.Registry = "noop"
 		}
-		namespaceTypeFilter := provider.NewNamespaceTypeFilter(cfg.AWSZoneType)
-		p, err = provider.NewAWSSDProvider(domainFilter, namespaceTypeFilter, cfg.TXTOwnerID, cfg.DryRun)
+		p, err = provider.NewAWSSDProvider(domainFilter, cfg.AWSZoneType, cfg.TXTOwnerID, cfg.DryRun)
 	case "azure":
 		p, err = provider.NewAzureProvider(cfg.AzureConfigFile, domainFilter, zoneIDFilter, cfg.AzureResourceGroup, cfg.DryRun)
 	case "cloudflare":

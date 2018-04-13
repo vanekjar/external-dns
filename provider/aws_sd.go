@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+Copyright 2018 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,13 +31,19 @@ import (
 	"github.com/kubernetes-incubator/external-dns/plan"
 	"github.com/linki/instrumented_http"
 	log "github.com/sirupsen/logrus"
-	"reflect"
 )
 
 const (
 	sdElbHostnameSuffix  = ".elb.amazonaws.com"
 	sdDefaultRecordTTL   = 300
 	sdServiceDescription = "Managed by Kubernetes External DNS (<owner-id>)"
+
+	sdNamespaceTypePublic  = "public"
+	sdNamespaceTypePrivate = "private"
+
+	sdInstanceAttrIPV4  = "AWS_INSTANCE_IPV4"
+	sdInstanceAttrCname = "AWS_INSTANCE_CNAME"
+	sdInstanceAttrAlias = "AWS_ALIAS_DNS_NAME"
 )
 
 // AWSServiceDiscoveryAPI is the subset of the AWS Route53 Auto Naming API that we actually use. Add methods as required.
@@ -66,7 +72,7 @@ type AWSSDProvider struct {
 }
 
 // NewAWSSDProvider initializes a new AWS Route53 Auto Naming based Provider.
-func NewAWSSDProvider(domainFilter DomainFilter, namespaceTypeFilter NamespaceTypeFilter, ownerID string, dryRun bool) (*AWSSDProvider, error) {
+func NewAWSSDProvider(domainFilter DomainFilter, namespaceType string, ownerID string, dryRun bool) (*AWSSDProvider, error) {
 	config := aws.NewConfig()
 
 	config = config.WithHTTPClient(
@@ -90,12 +96,30 @@ func NewAWSSDProvider(domainFilter DomainFilter, namespaceTypeFilter NamespaceTy
 	provider := &AWSSDProvider{
 		client:              sd.New(sess),
 		namespaceFilter:     domainFilter,
-		namespaceTypeFilter: namespaceTypeFilter.toAwsAPIRequestFilter(),
+		namespaceTypeFilter: newSdNamespaceFilter(namespaceType),
 		dryRun:              dryRun,
 		ownerID:             ownerID,
 	}
 
 	return provider, nil
+}
+
+// newSdNamespaceFilter initialized AWS SD Namespace Filter based on given string config
+func newSdNamespaceFilter(namespaceTypeConfig string) *sd.NamespaceFilter {
+	switch namespaceTypeConfig {
+	case sdNamespaceTypePublic:
+		return &sd.NamespaceFilter{
+			Name:   aws.String(sd.NamespaceFilterNameType),
+			Values: []*string{aws.String(sd.NamespaceTypeDnsPublic)},
+		}
+	case sdNamespaceTypePrivate:
+		return &sd.NamespaceFilter{
+			Name:   aws.String(sd.NamespaceFilterNameType),
+			Values: []*string{aws.String(sd.NamespaceTypeDnsPrivate)},
+		}
+	default:
+		return nil
+	}
 }
 
 // Records returns list of all endpoints.
@@ -120,10 +144,7 @@ func (p *AWSSDProvider) Records() (endpoints []*endpoint.Endpoint, err error) {
 			if len(instances) > 0 {
 				// DNS name of the record is a concatenation of service and namespace
 				dnsName := *srv.Name + "." + *ns.Name
-				ep, err := p.instancesToEndpoint(dnsName, srv, instances)
-				if err != nil {
-					return nil, err
-				}
+				ep := p.instancesToEndpoint(dnsName, srv, instances)
 				endpoints = append(endpoints, ep)
 			}
 		}
@@ -132,7 +153,7 @@ func (p *AWSSDProvider) Records() (endpoints []*endpoint.Endpoint, err error) {
 	return endpoints, nil
 }
 
-func (p *AWSSDProvider) instancesToEndpoint(recordName string, srv *sd.Service, instances []*sd.InstanceSummary) (*endpoint.Endpoint, error) {
+func (p *AWSSDProvider) instancesToEndpoint(recordName string, srv *sd.Service, instances []*sd.InstanceSummary) *endpoint.Endpoint {
 	newEndpoint := &endpoint.Endpoint{
 		DNSName:   recordName,
 		RecordTTL: endpoint.TTL(aws.Int64Value(srv.DnsConfig.DnsRecords[0].TTL)),
@@ -141,25 +162,25 @@ func (p *AWSSDProvider) instancesToEndpoint(recordName string, srv *sd.Service, 
 
 	for _, inst := range instances {
 		// CNAME
-		if inst.Attributes["AWS_INSTANCE_CNAME"] != nil && aws.StringValue(srv.DnsConfig.DnsRecords[0].Type) == sd.RecordTypeCname {
+		if inst.Attributes[sdInstanceAttrCname] != nil && aws.StringValue(srv.DnsConfig.DnsRecords[0].Type) == sd.RecordTypeCname {
 			newEndpoint.RecordType = endpoint.RecordTypeCNAME
-			newEndpoint.Targets = append(newEndpoint.Targets, aws.StringValue(inst.Attributes["AWS_INSTANCE_CNAME"]))
+			newEndpoint.Targets = append(newEndpoint.Targets, aws.StringValue(inst.Attributes[sdInstanceAttrCname]))
 
 			// ALIAS
-		} else if inst.Attributes["AWS_ALIAS_DNS_NAME"] != nil {
+		} else if inst.Attributes[sdInstanceAttrAlias] != nil {
 			newEndpoint.RecordType = endpoint.RecordTypeCNAME
-			newEndpoint.Targets = append(newEndpoint.Targets, aws.StringValue(inst.Attributes["AWS_ALIAS_DNS_NAME"]))
+			newEndpoint.Targets = append(newEndpoint.Targets, aws.StringValue(inst.Attributes[sdInstanceAttrAlias]))
 
 			// IP-based target
-		} else if inst.Attributes["AWS_INSTANCE_IPV4"] != nil {
+		} else if inst.Attributes[sdInstanceAttrIPV4] != nil {
 			newEndpoint.RecordType = endpoint.RecordTypeA
-			newEndpoint.Targets = append(newEndpoint.Targets, aws.StringValue(inst.Attributes["AWS_INSTANCE_IPV4"]))
+			newEndpoint.Targets = append(newEndpoint.Targets, aws.StringValue(inst.Attributes[sdInstanceAttrIPV4]))
 		} else {
-			return nil, fmt.Errorf("FATAL ERROR: Instance not valid \"%v\"", inst)
+			log.Warnf("Invalid instance \"%v\" found in service \"%v\"", inst, srv.Name)
 		}
 	}
 
-	return newEndpoint, nil
+	return newEndpoint
 }
 
 // ApplyChanges applies Kubernetes changes in endpoints to AWS API
@@ -180,6 +201,13 @@ func (p *AWSSDProvider) ApplyChanges(changes *plan.Changes) error {
 		return err
 	}
 
+	// Deletes must be executed first to support update case.
+	// When just list of targets is updated `[1.2.3.4] -> [1.2.3.4, 1.2.3.5]` it is translated to:
+	// ```
+	// deletes = [1.2.3.4]
+	// creates = [1.2.3.4, 1.2.3.5]
+	// ```
+	// then when deletes are executed after creates it will miss the `1.2.3.4` instance.
 	err = p.submitDeletes(namespaces, changes.Delete)
 	if err != nil {
 		return err
@@ -194,11 +222,16 @@ func (p *AWSSDProvider) ApplyChanges(changes *plan.Changes) error {
 }
 
 func (p *AWSSDProvider) updatesToCreates(changes *plan.Changes) (creates []*endpoint.Endpoint, deletes []*endpoint.Endpoint) {
-	for i, old := range changes.UpdateOld {
-		current := changes.UpdateNew[i]
+	updateNewMap := map[string]*endpoint.Endpoint{}
+	for _, e := range changes.UpdateNew {
+		updateNewMap[e.DNSName] = e
+	}
 
-		if !reflect.DeepEqual(old.Targets, current.Targets) || old.DNSName != current.DNSName {
-			// when targets or DNS name differ the old instances need to be de-registered first
+	for _, old := range changes.UpdateOld {
+		current := updateNewMap[old.DNSName]
+
+		if !old.Targets.Same(current.Targets) {
+			// when targets differ the old instances need to be de-registered first
 			deletes = append(deletes, old)
 		}
 
@@ -222,18 +255,14 @@ func (p *AWSSDProvider) submitCreates(namespaces []*sd.NamespaceSummary, changes
 			_, srvName := p.parseHostname(ch.DNSName)
 
 			srv := services[srvName]
-			summary := serviceToServiceSummary(srv)
 			if srv == nil {
 				// when service is missing create a new one
-				summary, err = p.CreateService(&nsID, &srvName, ch)
+				srv, err = p.CreateService(&nsID, &srvName, ch)
 				if err != nil {
 					return err
 				}
 				// update local list of services
-				services, err = p.ListServicesByNamespaceID(aws.String(nsID))
-				if err != nil {
-					return err
-				}
+				services[*srv.Name] = srv
 			} else {
 				// update service TTL when differs
 				if ch.RecordTTL.IsConfigured() && *srv.DnsConfig.DnsRecords[0].TTL != int64(ch.RecordTTL) {
@@ -244,7 +273,7 @@ func (p *AWSSDProvider) submitCreates(namespaces []*sd.NamespaceSummary, changes
 				}
 			}
 
-			err = p.RegisterInstance(summary, ch)
+			err = p.RegisterInstance(srv, ch)
 			if err != nil {
 				return err
 			}
@@ -267,9 +296,9 @@ func (p *AWSSDProvider) submitDeletes(namespaces []*sd.NamespaceSummary, changes
 			hostname := ch.DNSName
 			_, srvName := p.parseHostname(hostname)
 
-			srv := serviceToServiceSummary(services[srvName])
+			srv := services[srvName]
 			if srv == nil {
-				return fmt.Errorf("FATAL ERROR: Service \"%s\" is missing", srvName)
+				return fmt.Errorf("service \"%s\" is missing when trying to delete \"%v\"", srvName, hostname)
 			}
 
 			err := p.DeregisterInstance(srv, ch)
@@ -332,14 +361,10 @@ func (p *AWSSDProvider) ListServicesByNamespaceID(namespaceID *string) (map[stri
 	// get detail of each listed service
 	services := make(map[string]*sd.Service)
 	for _, serviceID := range serviceIds {
-		output, err := p.client.GetService(&sd.GetServiceInput{
-			Id: serviceID,
-		})
+		service, err := p.GetServiceDetail(serviceID)
 		if err != nil {
 			return nil, err
 		}
-
-		service := output.Service
 
 		// filter out services not owned by this External DNS
 		if p.ownerID != "" && aws.StringValue(service.CreatorRequestId) != p.ownerID {
@@ -350,6 +375,18 @@ func (p *AWSSDProvider) ListServicesByNamespaceID(namespaceID *string) (map[stri
 	}
 
 	return services, nil
+}
+
+// GetServiceDetail returns detail of given service
+func (p *AWSSDProvider) GetServiceDetail(serviceID *string) (*sd.Service, error) {
+	output, err := p.client.GetService(&sd.GetServiceInput{
+		Id: serviceID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return output.Service, nil
 }
 
 // ListInstancesByServiceID returns list of instances registered in given service.
@@ -372,8 +409,8 @@ func (p *AWSSDProvider) ListInstancesByServiceID(serviceID *string) ([]*sd.Insta
 	return instances, nil
 }
 
-// CreateService creates a new service in AWS API. Returns the created service summary.
-func (p *AWSSDProvider) CreateService(namespaceID *string, srvName *string, ep *endpoint.Endpoint) (*sd.ServiceSummary, error) {
+// CreateService creates a new service in AWS API. Returns the created service.
+func (p *AWSSDProvider) CreateService(namespaceID *string, srvName *string, ep *endpoint.Endpoint) (*sd.Service, error) {
 	log.Infof("Creating a new service \"%s\" in \"%s\" namespace", *srvName, *namespaceID)
 
 	srvType := p.serviceTypeFromEndpoint(ep)
@@ -402,11 +439,11 @@ func (p *AWSSDProvider) CreateService(namespaceID *string, srvName *string, ep *
 			return nil, err
 		}
 
-		return serviceToServiceSummary(out.Service), nil
+		return out.Service, nil
 	}
 
 	// return mock service summary in case of dry run
-	return &sd.ServiceSummary{Id: aws.String("dry-run-service"), Name: aws.String("dry-run-service")}, nil
+	return &sd.Service{Id: aws.String("dry-run-service"), Name: aws.String("dry-run-service")}, nil
 }
 
 // UpdateService updates the specified service with information from provided endpoint.
@@ -439,7 +476,7 @@ func (p *AWSSDProvider) UpdateService(service *sd.Service, ep *endpoint.Endpoint
 }
 
 // RegisterInstance creates a new instance in given service.
-func (p *AWSSDProvider) RegisterInstance(service *sd.ServiceSummary, ep *endpoint.Endpoint) error {
+func (p *AWSSDProvider) RegisterInstance(service *sd.Service, ep *endpoint.Endpoint) error {
 	for _, target := range ep.Targets {
 		log.Infof("Registering a new instance \"%s\" for service \"%s\" (%s)", target, *service.Name, *service.Id)
 
@@ -447,14 +484,14 @@ func (p *AWSSDProvider) RegisterInstance(service *sd.ServiceSummary, ep *endpoin
 
 		if ep.RecordType == endpoint.RecordTypeCNAME {
 			if p.isAWSLoadBalancer(target) {
-				attr["AWS_ALIAS_DNS_NAME"] = aws.String(target)
+				attr[sdInstanceAttrAlias] = aws.String(target)
 			} else {
-				attr["AWS_INSTANCE_CNAME"] = aws.String(target)
+				attr[sdInstanceAttrCname] = aws.String(target)
 			}
 		} else if ep.RecordType == endpoint.RecordTypeA {
-			attr["AWS_INSTANCE_IPV4"] = aws.String(target)
+			attr[sdInstanceAttrIPV4] = aws.String(target)
 		} else {
-			return fmt.Errorf("FATAL ERROR: Invalid endpoint type (%v)", ep)
+			return fmt.Errorf("invalid endpoint type (%v)", ep)
 		}
 
 		if !p.dryRun {
@@ -473,7 +510,7 @@ func (p *AWSSDProvider) RegisterInstance(service *sd.ServiceSummary, ep *endpoin
 }
 
 // DeregisterInstance removes an instance from given service.
-func (p *AWSSDProvider) DeregisterInstance(service *sd.ServiceSummary, ep *endpoint.Endpoint) error {
+func (p *AWSSDProvider) DeregisterInstance(service *sd.Service, ep *endpoint.Endpoint) error {
 	for _, target := range ep.Targets {
 		log.Infof("De-registering an instance \"%s\" for service \"%s\" (%s)", target, *service.Name, *service.Id)
 
