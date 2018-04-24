@@ -554,6 +554,8 @@ func namespaceToNamespaceSummary(namespace *sd.Namespace) *sd.NamespaceSummary {
 	}
 }
 
+// nolint: deadcode
+// used from unit test
 func serviceToServiceSummary(service *sd.Service) *sd.ServiceSummary {
 	if service == nil {
 		return nil

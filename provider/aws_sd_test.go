@@ -800,7 +800,7 @@ func TestAWSSDProvider_DeregisterInstance(t *testing.T) {
 	instances := map[string]map[string]*sd.Instance{
 		"srv1": {
 			"1.2.3.4": {
-				Id: aws.String("inst1"),
+				Id: aws.String("1.2.3.4"),
 				Attributes: map[string]*string{
 					sdInstanceAttrIPV4: aws.String("1.2.3.4"),
 				},
@@ -816,7 +816,7 @@ func TestAWSSDProvider_DeregisterInstance(t *testing.T) {
 
 	provider := newAWSSDProvider(api, NewDomainFilter([]string{}), "", "")
 
-	provider.DeregisterInstance(services["private"]["srv1"], endpoint.NewEndpoint("srv1.private.com.", "1.2.3.4", endpoint.RecordTypeA))
+	provider.DeregisterInstance(services["private"]["srv1"], endpoint.NewEndpoint("srv1.private.com.", endpoint.RecordTypeA, "1.2.3.4"))
 
 	assert.Len(t, instances["srv1"], 0)
 }
