@@ -142,9 +142,7 @@ func (p *AWSSDProvider) Records() (endpoints []*endpoint.Endpoint, err error) {
 			}
 
 			if len(instances) > 0 {
-				// DNS name of the record is a concatenation of service and namespace
-				dnsName := *srv.Name + "." + *ns.Name
-				ep := p.instancesToEndpoint(dnsName, srv, instances)
+				ep := p.instancesToEndpoint(ns, srv, instances)
 				endpoints = append(endpoints, ep)
 			}
 		}
@@ -153,7 +151,10 @@ func (p *AWSSDProvider) Records() (endpoints []*endpoint.Endpoint, err error) {
 	return endpoints, nil
 }
 
-func (p *AWSSDProvider) instancesToEndpoint(recordName string, srv *sd.Service, instances []*sd.InstanceSummary) *endpoint.Endpoint {
+func (p *AWSSDProvider) instancesToEndpoint(ns *sd.NamespaceSummary, srv *sd.Service, instances []*sd.InstanceSummary) *endpoint.Endpoint {
+	// DNS name of the record is a concatenation of service and namespace
+	recordName := *srv.Name + "." + *ns.Name
+
 	newEndpoint := &endpoint.Endpoint{
 		DNSName:   recordName,
 		RecordTTL: endpoint.TTL(aws.Int64Value(srv.DnsConfig.DnsRecords[0].TTL)),

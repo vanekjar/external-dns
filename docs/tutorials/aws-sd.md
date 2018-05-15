@@ -43,17 +43,6 @@ To use the service discovery API, a user executing the ExternalDNS must have the
 }
 ```
 
-
-You can also create a dedicated IAM user for `ExternalDNS`:
-
-```console
-$ aws iam create-group --group-name external-dns
-$ aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/AmazonRoute53AutoNamingFullAccess --group-name external-dns
-$ aws iam create-user --user-name external-dns
-$ aws iam add-user-to-group --user-name external-dns --group-name external-dns
-```
-
-
 ## Set up a namespace
 
 Create a DNS namespace using the service discovery API
