@@ -46,9 +46,9 @@ const (
 	sdInstanceAttrAlias = "AWS_ALIAS_DNS_NAME"
 )
 
-// AWSServiceDiscoveryAPI is the subset of the AWS Route53 Auto Naming API that we actually use. Add methods as required.
+// AWSSDClient is the subset of the AWS Route53 Auto Naming API that we actually use. Add methods as required.
 // Signatures must match exactly. Taken from https://github.com/aws/aws-sdk-go/blob/master/service/servicediscovery/api.go
-type AWSServiceDiscoveryAPI interface {
+type AWSSDClient interface {
 	CreateService(input *sd.CreateServiceInput) (*sd.CreateServiceOutput, error)
 	DeregisterInstance(input *sd.DeregisterInstanceInput) (*sd.DeregisterInstanceOutput, error)
 	GetService(input *sd.GetServiceInput) (*sd.GetServiceOutput, error)
@@ -61,18 +61,16 @@ type AWSServiceDiscoveryAPI interface {
 
 // AWSSDProvider is an implementation of Provider for AWS Route53 Auto Naming.
 type AWSSDProvider struct {
-	client AWSServiceDiscoveryAPI
+	client AWSSDClient
 	dryRun bool
 	// only consider namespaces ending in this suffix
 	namespaceFilter DomainFilter
 	// filter namespace by type (private or public)
 	namespaceTypeFilter *sd.NamespaceFilter
-	// refers to the owner id of the managed services
-	ownerID string
 }
 
 // NewAWSSDProvider initializes a new AWS Route53 Auto Naming based Provider.
-func NewAWSSDProvider(domainFilter DomainFilter, namespaceType string, ownerID string, dryRun bool) (*AWSSDProvider, error) {
+func NewAWSSDProvider(domainFilter DomainFilter, namespaceType string, dryRun bool) (*AWSSDProvider, error) {
 	config := aws.NewConfig()
 
 	config = config.WithHTTPClient(
@@ -98,7 +96,6 @@ func NewAWSSDProvider(domainFilter DomainFilter, namespaceType string, ownerID s
 		namespaceFilter:     domainFilter,
 		namespaceTypeFilter: newSdNamespaceFilter(namespaceType),
 		dryRun:              dryRun,
-		ownerID:             ownerID,
 	}
 
 	return provider, nil
@@ -155,10 +152,14 @@ func (p *AWSSDProvider) instancesToEndpoint(ns *sd.NamespaceSummary, srv *sd.Ser
 	// DNS name of the record is a concatenation of service and namespace
 	recordName := *srv.Name + "." + *ns.Name
 
+	labels := endpoint.NewLabels()
+	labels[endpoint.AWSSDCreatorIDLabel] = aws.StringValue(srv.CreatorRequestId)
+
 	newEndpoint := &endpoint.Endpoint{
 		DNSName:   recordName,
 		RecordTTL: endpoint.TTL(aws.Int64Value(srv.DnsConfig.DnsRecords[0].TTL)),
 		Targets:   make(endpoint.Targets, 0, len(instances)),
+		Labels:    labels,
 	}
 
 	for _, inst := range instances {
@@ -367,11 +368,6 @@ func (p *AWSSDProvider) ListServicesByNamespaceID(namespaceID *string) (map[stri
 			return nil, err
 		}
 
-		// filter out services not owned by this External DNS
-		if p.ownerID != "" && aws.StringValue(service.CreatorRequestId) != p.ownerID {
-			continue
-		}
-
 		services[aws.StringValue(service.Name)] = service
 	}
 
@@ -426,7 +422,7 @@ func (p *AWSSDProvider) CreateService(namespaceID *string, srvName *string, ep *
 		out, err := p.client.CreateService(&sd.CreateServiceInput{
 			Name:             srvName,
 			Description:      aws.String(strings.Replace(sdServiceDescription, "<owner-id>", p.ownerID, 1)),
-			CreatorRequestId: aws.String(p.ownerID),
+			CreatorRequestId: aws.String(ep.Labels[endpoint.AWSSDCreatorIDLabel]),
 			DnsConfig: &sd.DnsConfig{
 				NamespaceId:   namespaceID,
 				RoutingPolicy: aws.String(routingPolicy),

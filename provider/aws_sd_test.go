@@ -33,9 +33,9 @@ import (
 )
 
 // Compile time check for interface conformance
-var _ AWSServiceDiscoveryAPI = &AWSServiceDiscoveryAPIStub{}
+var _ AWSSDClient = &AWSSDClientStub{}
 
-type AWSServiceDiscoveryAPIStub struct {
+type AWSSDClientStub struct {
 	// map[namespace_id]namespace
 	namespaces map[string]*sd.Namespace
 
@@ -46,7 +46,7 @@ type AWSServiceDiscoveryAPIStub struct {
 	instances map[string]map[string]*sd.Instance
 }
 
-func (s *AWSServiceDiscoveryAPIStub) CreateService(input *sd.CreateServiceInput) (*sd.CreateServiceOutput, error) {
+func (s *AWSSDClientStub) CreateService(input *sd.CreateServiceInput) (*sd.CreateServiceOutput, error) {
 
 	srv := &sd.Service{
 		Id:               aws.String(string(rand.Intn(10000))),
@@ -69,14 +69,14 @@ func (s *AWSServiceDiscoveryAPIStub) CreateService(input *sd.CreateServiceInput)
 	}, nil
 }
 
-func (s *AWSServiceDiscoveryAPIStub) DeregisterInstance(input *sd.DeregisterInstanceInput) (*sd.DeregisterInstanceOutput, error) {
+func (s *AWSSDClientStub) DeregisterInstance(input *sd.DeregisterInstanceInput) (*sd.DeregisterInstanceOutput, error) {
 	serviceInstances := s.instances[*input.ServiceId]
 	delete(serviceInstances, *input.InstanceId)
 
 	return &sd.DeregisterInstanceOutput{}, nil
 }
 
-func (s *AWSServiceDiscoveryAPIStub) GetService(input *sd.GetServiceInput) (*sd.GetServiceOutput, error) {
+func (s *AWSSDClientStub) GetService(input *sd.GetServiceInput) (*sd.GetServiceOutput, error) {
 	for _, entry := range s.services {
 		srv, ok := entry[*input.Id]
 		if ok {
@@ -89,7 +89,7 @@ func (s *AWSServiceDiscoveryAPIStub) GetService(input *sd.GetServiceInput) (*sd.
 	return nil, errors.New("service not found")
 }
 
-func (s *AWSServiceDiscoveryAPIStub) ListInstancesPages(input *sd.ListInstancesInput, fn func(*sd.ListInstancesOutput, bool) bool) error {
+func (s *AWSSDClientStub) ListInstancesPages(input *sd.ListInstancesInput, fn func(*sd.ListInstancesOutput, bool) bool) error {
 	instances := make([]*sd.InstanceSummary, 0)
 
 	for _, inst := range s.instances[*input.ServiceId] {
@@ -103,7 +103,7 @@ func (s *AWSServiceDiscoveryAPIStub) ListInstancesPages(input *sd.ListInstancesI
 	return nil
 }
 
-func (s *AWSServiceDiscoveryAPIStub) ListNamespacesPages(input *sd.ListNamespacesInput, fn func(*sd.ListNamespacesOutput, bool) bool) error {
+func (s *AWSSDClientStub) ListNamespacesPages(input *sd.ListNamespacesInput, fn func(*sd.ListNamespacesOutput, bool) bool) error {
 	namespaces := make([]*sd.NamespaceSummary, 0)
 
 	filter := input.Filters[0]
@@ -125,7 +125,7 @@ func (s *AWSServiceDiscoveryAPIStub) ListNamespacesPages(input *sd.ListNamespace
 	return nil
 }
 
-func (s *AWSServiceDiscoveryAPIStub) ListServicesPages(input *sd.ListServicesInput, fn func(*sd.ListServicesOutput, bool) bool) error {
+func (s *AWSSDClientStub) ListServicesPages(input *sd.ListServicesInput, fn func(*sd.ListServicesOutput, bool) bool) error {
 	services := make([]*sd.ServiceSummary, 0)
 
 	// get namespace filter
@@ -146,7 +146,7 @@ func (s *AWSServiceDiscoveryAPIStub) ListServicesPages(input *sd.ListServicesInp
 	return nil
 }
 
-func (s *AWSServiceDiscoveryAPIStub) RegisterInstance(input *sd.RegisterInstanceInput) (*sd.RegisterInstanceOutput, error) {
+func (s *AWSSDClientStub) RegisterInstance(input *sd.RegisterInstanceInput) (*sd.RegisterInstanceOutput, error) {
 
 	srvInstances, ok := s.instances[*input.ServiceId]
 	if !ok {
@@ -163,7 +163,7 @@ func (s *AWSServiceDiscoveryAPIStub) RegisterInstance(input *sd.RegisterInstance
 	return &sd.RegisterInstanceOutput{}, nil
 }
 
-func (s *AWSServiceDiscoveryAPIStub) UpdateService(input *sd.UpdateServiceInput) (*sd.UpdateServiceOutput, error) {
+func (s *AWSSDClientStub) UpdateService(input *sd.UpdateServiceInput) (*sd.UpdateServiceOutput, error) {
 	out, err := s.GetService(&sd.GetServiceInput{Id: input.Id})
 	if err != nil {
 		return nil, err
@@ -178,7 +178,7 @@ func (s *AWSServiceDiscoveryAPIStub) UpdateService(input *sd.UpdateServiceInput)
 	return &sd.UpdateServiceOutput{}, nil
 }
 
-func newAWSSDProvider(api AWSServiceDiscoveryAPI, domainFilter DomainFilter, namespaceTypeFilter string, ownerID string) *AWSSDProvider {
+func newAWSSDProvider(api AWSSDClient, domainFilter DomainFilter, namespaceTypeFilter string, ownerID string) *AWSSDProvider {
 	return &AWSSDProvider{
 		client:              api,
 		namespaceFilter:     domainFilter,
@@ -280,7 +280,7 @@ func TestAWSSDProvider_Records(t *testing.T) {
 		{DNSName: "service3.private.com", Targets: endpoint.Targets{"cname.target.com"}, RecordType: endpoint.RecordTypeCNAME, RecordTTL: 80},
 	}
 
-	api := &AWSServiceDiscoveryAPIStub{
+	api := &AWSSDClientStub{
 		namespaces: namespaces,
 		services:   services,
 		instances:  instances,
@@ -302,7 +302,7 @@ func TestAWSSDProvider_ApplyChanges(t *testing.T) {
 		},
 	}
 
-	api := &AWSServiceDiscoveryAPIStub{
+	api := &AWSSDClientStub{
 		namespaces: namespaces,
 		services:   make(map[string]map[string]*sd.Service),
 		instances:  make(map[string]map[string]*sd.Instance),
@@ -356,7 +356,7 @@ func TestAWSSDProvider_ListNamespaces(t *testing.T) {
 		},
 	}
 
-	api := &AWSServiceDiscoveryAPIStub{
+	api := &AWSSDClientStub{
 		namespaces: namespaces,
 	}
 
@@ -427,7 +427,7 @@ func TestAWSSDProvider_ListServicesByNamespace(t *testing.T) {
 		},
 	}
 
-	api := &AWSServiceDiscoveryAPIStub{
+	api := &AWSSDClientStub{
 		namespaces: namespaces,
 		services:   services,
 	}
@@ -492,7 +492,7 @@ func TestAWSSDProvider_ListInstancesByService(t *testing.T) {
 		},
 	}
 
-	api := &AWSServiceDiscoveryAPIStub{
+	api := &AWSSDClientStub{
 		namespaces: namespaces,
 		services:   services,
 		instances:  instances,
@@ -528,7 +528,7 @@ func TestAWSSDProvider_CreateService(t *testing.T) {
 		},
 	}
 
-	api := &AWSServiceDiscoveryAPIStub{
+	api := &AWSSDClientStub{
 		namespaces: namespaces,
 		services:   make(map[string]map[string]*sd.Service),
 	}
@@ -638,7 +638,7 @@ func TestAWSSDProvider_UpdateService(t *testing.T) {
 		},
 	}
 
-	api := &AWSServiceDiscoveryAPIStub{
+	api := &AWSSDClientStub{
 		namespaces: namespaces,
 		services:   services,
 	}
@@ -704,7 +704,7 @@ func TestAWSSDProvider_RegisterInstance(t *testing.T) {
 		},
 	}
 
-	api := &AWSServiceDiscoveryAPIStub{
+	api := &AWSSDClientStub{
 		namespaces: namespaces,
 		services:   services,
 		instances:  make(map[string]map[string]*sd.Instance),
@@ -808,7 +808,7 @@ func TestAWSSDProvider_DeregisterInstance(t *testing.T) {
 		},
 	}
 
-	api := &AWSServiceDiscoveryAPIStub{
+	api := &AWSSDClientStub{
 		namespaces: namespaces,
 		services:   services,
 		instances:  instances,
