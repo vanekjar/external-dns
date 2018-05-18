@@ -43,8 +43,8 @@ func NewAWSSDRegistry(awsSDProvider *provider.AWSSDProvider, ownerID string) (*A
 
 // Records calls AWS SD API and expects AWS SD provider to provider Owner/Resource information as a serialized
 // value in the AWSSDCreatorIDLabel value in the Labels map
-func (sdr *AWSSDRegistry) Records([]*endpoint.Endpoint, error) {
-	records, err := im.provider.Records()
+func (sdr *AWSSDRegistry) Records() ([]*endpoint.Endpoint, error) {
+	records, err := sdr.awsSDProvider.Records()
 	if err != nil {
 		return nil, err
 	}
@@ -72,10 +72,10 @@ func (sdr *AWSSDRegistry) ApplyChanges(changes *plan.Changes) error {
 		Delete:    filterOwnedRecords(sdr.ownerID, changes.Delete),
 	}
 
-	filteredChanges.Create = sdr.updateCreatorLabel(filteredChanges.Create)
-	filteredChanges.UpdateNew = sdr.updateCreatorLabel(filteredChanges.UpdateNew)
-	filteredChanges.UpdateOld = sdr.updateCreatorLabel(filteredChanges.UpdateOld)
-	filteredChanges.Delete = sdr.updateCreatorLabel(filteredChanges.Delete)
+	sdr.updateCreatorLabel(filteredChanges.Create)
+	sdr.updateCreatorLabel(filteredChanges.UpdateNew)
+	sdr.updateCreatorLabel(filteredChanges.UpdateOld)
+	sdr.updateCreatorLabel(filteredChanges.Delete)
 
 	return sdr.awsSDProvider.ApplyChanges(filteredChanges)
 }

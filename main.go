@@ -98,11 +98,11 @@ func main() {
 	case "aws-sd":
 		// Check that TXT registry is not used with AWS SD.
 		// Ownership information is maintained automatically in SD API using CreatorRequestId field.
-		if cfg.Registry != "noop" {
-			log.Infof("No need to use \"%s\" registry with AWS ServiceDiscovery. Switching to \"noop\".", cfg.Registry)
-			cfg.Registry = "noop"
+		if cfg.Registry != "aws-sd-registry" {
+			log.Infof("No need to use \"%s\" registry with AWS ServiceDiscovery. Switching to \"aws-sd-registry\".", cfg.Registry)
+			cfg.Registry = "aws-sd-registry"
 		}
-		p, err = provider.NewAWSSDProvider(domainFilter, cfg.AWSZoneType, cfg.TXTOwnerID, cfg.DryRun)
+		p, err = provider.NewAWSSDProvider(domainFilter, cfg.AWSZoneType, cfg.DryRun)
 	case "azure":
 		p, err = provider.NewAzureProvider(cfg.AzureConfigFile, domainFilter, zoneIDFilter, cfg.AzureResourceGroup, cfg.DryRun)
 	case "cloudflare":
@@ -159,6 +159,8 @@ func main() {
 		r, err = registry.NewNoopRegistry(p)
 	case "txt":
 		r, err = registry.NewTXTRegistry(p, cfg.TXTPrefix, cfg.TXTOwnerID)
+	case "aws-sd-registry":
+		r, err = registry.NewAWSSDRegistry(p.(*provider.AWSSDProvider), cfg.TXTOwnerID)
 	default:
 		log.Fatalf("unknown registry: %s", cfg.Registry)
 	}
@@ -187,7 +189,6 @@ func main() {
 
 		os.Exit(0)
 	}
-
 	ctrl.Run(stopChan)
 }
 
