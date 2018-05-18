@@ -421,7 +421,7 @@ func (p *AWSSDProvider) CreateService(namespaceID *string, srvName *string, ep *
 	if !p.dryRun {
 		out, err := p.client.CreateService(&sd.CreateServiceInput{
 			Name:             srvName,
-			Description:      aws.String(strings.Replace(sdServiceDescription, "<owner-id>", p.ownerID, 1)),
+			Description:      aws.String(strings.Replace(sdServiceDescription, "<owner-id>", ep.Labels[endpoint.AWSSDCreatorIDLabel], 1)),
 			CreatorRequestId: aws.String(ep.Labels[endpoint.AWSSDCreatorIDLabel]),
 			DnsConfig: &sd.DnsConfig{
 				NamespaceId:   namespaceID,
