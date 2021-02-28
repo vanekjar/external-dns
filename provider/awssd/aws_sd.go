@@ -312,12 +312,13 @@ func (p *AWSSDProvider) updatesToCreates(changes *plan.Changes) (creates []*endp
 	return creates, deletes
 }
 
+// handles SRV changes. It links related A and SRV endpoints together (in the internal relevantChanges struct).
 func (p *AWSSDProvider) handleSRVChanges(namespaces []*sd.NamespaceSummary, creates []*endpoint.Endpoint, deletes []*endpoint.Endpoint) ([]*endpoint.Endpoint, []*endpoint.Endpoint, error) {
-	//create a struct of all relevant changes to handle SRV-related changes
+	// an internal struct of all related relevant changes to handle SRV endpoints.
 	type relevantChanges struct {
-		ACre   []*endpoint.Endpoint // max len is 1
-		SRVCre []*endpoint.Endpoint // max len is 1
-		SRVDel []*endpoint.Endpoint // max len is n
+		ACre   []*endpoint.Endpoint // max len is 1. This is a create endpoint with recordType A
+		SRVCre []*endpoint.Endpoint // max len is 1. This is a delete endpoint with recordType SRV
+		SRVDel []*endpoint.Endpoint // max len is n. These are delete endpoints with recordType SRV
 	}
 
 	createsByNamespaceID := p.changesByNamespaceID(namespaces, creates)
@@ -339,51 +340,55 @@ func (p *AWSSDProvider) handleSRVChanges(namespaces []*sd.NamespaceSummary, crea
 
 		//create a map of relevant changes by host. will loop this map later to determine any SRV-related changes
 		changesByHost := make(map[string]*relevantChanges)
-		if okNsCre {
-			for _, ch := range nsCreates {
-				// add a Create record type to the changesByHost. Add max 1 because only 1 SRV is supported for 1 host
-				if ch.RecordType == endpoint.RecordTypeSRV {
-					_, host, _, _, err := p.srvHostTargetSplit(ch.Targets[0])
-					if err != nil {
-						return nil, nil, err
-					}
-					if _, ok := changesByHost[host]; !ok {
-						changesByHost[host] = &relevantChanges{}
-					}
-					chByHost := changesByHost[host]
-					if len(chByHost.SRVCre) == 0 {
-						chByHost.SRVCre = append(chByHost.SRVCre, ch)
-					}
+		for _, ch := range nsCreates {
+			// Cloud Map supports 1 SRV endpoint per host. Therefore, add only the first SRV endpoint per host to the "changesByHost" object.
+			// This means that any SRV endpoint on the same host (after the first) is ignored.
+			// The 1st SRV endpoint is added to "SRVCre" under "changesByHost". Will be used later to check if an SRV service needs to be created/updated.
+			if ch.RecordType == endpoint.RecordTypeSRV {
+				// the target host of the SRV endpoint is the element that links the SRV endpoint to the related A endpoint.
+				// The target host of the SRV endpoint is equal to the DNS Name of the related A endpoint.
+				_, host, _, _, err := p.srvHostTargetSplit(ch.Targets[0])
+				if err != nil {
+					return nil, nil, err
 				}
-				// add a Create record type to the changesByHost. Add max 1 because only 1 A is expected for 1 host
-				if ch.RecordType == endpoint.RecordTypeA {
-					host := ch.DNSName
-					if _, ok := changesByHost[host]; !ok {
-						changesByHost[host] = &relevantChanges{}
-					}
-					chByHost := changesByHost[host]
-					if len(chByHost.ACre) == 0 {
-						chByHost.ACre = append(chByHost.ACre, ch)
-					} else {
-						log.Warnf("Skipping record %s because only 1 create change is expected for A record. This is unexpected.", ch.String())
-					}
+				if _, ok := changesByHost[host]; !ok {
+					changesByHost[host] = &relevantChanges{}
+				}
+				chByHost := changesByHost[host]
+				// only consider 1 SRV create endpoint by host. Any other SRV create endpoint with the same host will be ignored.
+				if len(chByHost.SRVCre) == 0 {
+					chByHost.SRVCre = append(chByHost.SRVCre, ch)
+				}
+
+				// 1 A endpoint per host is expected. Therefore, add only the first A endpoint per host to the "changesByHost" object.
+				// This means that any A endpoint on the same host (after the first) is ignored.
+				// The 1st A endpoint is added to "ACre" under "changesByHost". Will be used later to check if an A service needs to be created/updated, and if it has a related SRV endpoint.
+			} else if ch.RecordType == endpoint.RecordTypeA {
+				host := ch.DNSName
+				if _, ok := changesByHost[host]; !ok {
+					changesByHost[host] = &relevantChanges{}
+				}
+				chByHost := changesByHost[host]
+				// only consider 1 A create endpoint by host. 1 A endpoint only is expected for 1 host. If this is not the case, emit a warn.
+				if len(chByHost.ACre) == 0 {
+					chByHost.ACre = append(chByHost.ACre, ch)
+				} else {
+					log.Warnf("Skipping endpoint %s because only 1 create change is expected for A endpoint. This is unexpected.", ch.String())
 				}
 			}
 		}
-		if okNsDel {
-			for _, ch := range nsDeletes {
-				// add a Delete record type to the changesByHost. Add n records because n SRV deletes are expected
-				if ch.RecordType == endpoint.RecordTypeSRV {
-					_, host, _, _, err := p.srvHostTargetSplit(ch.Targets[0])
-					if err != nil {
-						return nil, nil, err
-					}
-					if _, ok := changesByHost[host]; !ok {
-						changesByHost[host] = &relevantChanges{}
-					}
-					chByHost := changesByHost[host]
-					chByHost.SRVDel = append(chByHost.SRVDel, ch)
+		for _, ch := range nsDeletes {
+			// SRV endpoints are added to "SRVDel" under "changesByHost". Will be used later to check if an existing A+SRV service needs to be deleted/updated.
+			if ch.RecordType == endpoint.RecordTypeSRV {
+				_, host, _, _, err := p.srvHostTargetSplit(ch.Targets[0])
+				if err != nil {
+					return nil, nil, err
 				}
+				if _, ok := changesByHost[host]; !ok {
+					changesByHost[host] = &relevantChanges{}
+				}
+				chByHost := changesByHost[host]
+				chByHost.SRVDel = append(chByHost.SRVDel, ch)
 			}
 		}
 
@@ -391,7 +396,7 @@ func (p *AWSSDProvider) handleSRVChanges(namespaces []*sd.NamespaceSummary, crea
 		for host, relCh := range changesByHost {
 			_, svcName := p.parseHostname(host)
 
-			// defome some relevant variables for handling the host-level changes
+			// define some relevant variables for handling the host-level changes
 			ASvc, ASvcExists := services[svcName]
 			var ASvcIsAAndSRV bool
 			if ASvcExists && p.isAAndSRVService(ASvc) {
