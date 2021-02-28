@@ -189,6 +189,7 @@ func (p *AWSSDProvider) instancesToEndpoint(ns *sd.NamespaceSummary, srv *sd.Ser
 	isAAndSRV := p.isAAndSRVService(srv)
 	portsList := make([]string, 0, len(instances))
 	prefSrv := ""
+	mainDnsRecord := p.mainDnsRecord(srv)
 
 	if isAAndSRV {
 		// if record type is A+SRV, parse the description field
@@ -198,14 +199,14 @@ func (p *AWSSDProvider) instancesToEndpoint(ns *sd.NamespaceSummary, srv *sd.Ser
 	labels[endpoint.AWSSDDescriptionLabel] = srvDescr
 	newEndpoint := &endpoint.Endpoint{
 		DNSName:   recordName,
-		RecordTTL: endpoint.TTL(aws.Int64Value(srv.DnsConfig.DnsRecords[0].TTL)),
+		RecordTTL: endpoint.TTL(aws.Int64Value(mainDnsRecord.TTL)),
 		Targets:   make(endpoint.Targets, 0, len(instances)),
 		Labels:    labels,
 	}
 
 	for _, inst := range instances {
 		// CNAME
-		if inst.Attributes[sdInstanceAttrCname] != nil && aws.StringValue(srv.DnsConfig.DnsRecords[0].Type) == sd.RecordTypeCname {
+		if inst.Attributes[sdInstanceAttrCname] != nil && aws.StringValue(mainDnsRecord.Type) == sd.RecordTypeCname {
 			newEndpoint.RecordType = endpoint.RecordTypeCNAME
 			newEndpoint.Targets = append(newEndpoint.Targets, aws.StringValue(inst.Attributes[sdInstanceAttrCname]))
 
@@ -520,9 +521,11 @@ func (p *AWSSDProvider) SvcToEpNewPrefSrv(ns *sd.NamespaceSummary, srv *sd.Servi
 	labels[endpoint.AWSSDDescriptionLabel] = srvDescr
 	labels[labelPreferredSRV] = labPrefSRV
 
+	mainDnsRecord := p.mainDnsRecord(srv)
+
 	newEndpoint := &endpoint.Endpoint{
 		DNSName:    recordName,
-		RecordTTL:  endpoint.TTL(aws.Int64Value(srv.DnsConfig.DnsRecords[0].TTL)),
+		RecordTTL:  endpoint.TTL(aws.Int64Value(mainDnsRecord.TTL)),
 		Targets:    make(endpoint.Targets, 0, 0),
 		Labels:     labels,
 		RecordType: endpoint.RecordTypeA,
@@ -554,6 +557,7 @@ func (p *AWSSDProvider) submitCreates(namespaces []*sd.NamespaceSummary, changes
 			}
 
 			srv := services[srvName]
+			mainDnsRecord := p.mainDnsRecord(srv)
 			if srv == nil {
 				// when service is missing create a new one
 				srv, err = p.CreateService(&nsID, &srvName, ch)
@@ -562,7 +566,7 @@ func (p *AWSSDProvider) submitCreates(namespaces []*sd.NamespaceSummary, changes
 				}
 				// update local list of services
 				services[*srv.Name] = srv
-			} else if (ch.RecordTTL.IsConfigured() && *srv.DnsConfig.DnsRecords[0].TTL != int64(ch.RecordTTL)) ||
+			} else if (ch.RecordTTL.IsConfigured() && *mainDnsRecord.TTL != int64(ch.RecordTTL)) ||
 				aws.StringValue(srv.Description) != ch.Labels[endpoint.AWSSDDescriptionLabel] {
 				// update service when TTL or Description differ
 				err = p.UpdateService(srv, ch)
@@ -1137,7 +1141,19 @@ func (p *AWSSDProvider) isAWSLoadBalancer(hostname string) bool {
 
 // determine if a given service is of type A+SRV
 func (p *AWSSDProvider) isAAndSRVService(srv *sd.Service) bool {
-	return len(srv.DnsConfig.DnsRecords) == 2 && aws.StringValue(srv.DnsConfig.DnsRecords[0].Type) == sd.RecordTypeA && aws.StringValue(srv.DnsConfig.DnsRecords[1].Type) == sd.RecordTypeSrv
+	return len(srv.DnsConfig.DnsRecords) == 2 &&
+		((aws.StringValue(srv.DnsConfig.DnsRecords[0].Type) == sd.RecordTypeA && aws.StringValue(srv.DnsConfig.DnsRecords[1].Type) == sd.RecordTypeSrv) ||
+			(aws.StringValue(srv.DnsConfig.DnsRecords[0].Type) == sd.RecordTypeSrv && aws.StringValue(srv.DnsConfig.DnsRecords[1].Type) == sd.RecordTypeA))
+}
+
+// returns the main DnsRecord of a service. In case of A+SRV service, it is the A DnsRecord
+func (p *AWSSDProvider) mainDnsRecord(srv *sd.Service) *sd.DnsRecord {
+	mainDnsRecord := srv.DnsConfig.DnsRecords[0]
+	// Cloud Map API doesn't guarantee a specific order for DnsRecords in a service. if "SRV" appears before "A", then make sure "A" is still the main DnsRecord.
+	if p.isAAndSRVService(srv) && aws.StringValue(mainDnsRecord.Type) == sd.RecordTypeSrv {
+		mainDnsRecord = srv.DnsConfig.DnsRecords[1]
+	}
+	return mainDnsRecord
 }
 
 func (p *AWSSDProvider) srvHostTargetSplit(target string) (port string, host string, prio string, weight string, err error) {
