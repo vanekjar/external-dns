@@ -265,29 +265,23 @@ func (p *AWSSDProvider) ApplyChanges(ctx context.Context, changes *plan.Changes)
 	changes.Delete = append(changes.Delete, deletes...)
 	changes.Create = append(changes.Create, creates...)
 
-	// remove redundant targets from Create and Delete
-	dedupCreate, dedupDelete, err := p.DedupDeletesAndCreates(changes.Create, changes.Delete)
-	if err != nil {
-		return err
-	}
-
 	namespaces, err := p.ListNamespaces()
 	if err != nil {
 		return err
 	}
 
-	// remove redundant targets from Create and Delete
-	dedupCreate, dedupDelete, err = p.handleSRVChanges(namespaces, dedupCreate, dedupDelete)
+	// SRV changes are handled separately
+	changes.Create, changes.Delete, err = p.handleSRVChanges(namespaces, changes.Create, changes.Delete)
 	if err != nil {
 		return err
 	}
 
-	err = p.submitDeletes(namespaces, dedupDelete)
+	err = p.submitDeletes(namespaces, changes.Delete)
 	if err != nil {
 		return err
 	}
 
-	err = p.submitCreates(namespaces, dedupCreate)
+	err = p.submitCreates(namespaces, changes.Create)
 	if err != nil {
 		return err
 	}
@@ -304,13 +298,15 @@ func (p *AWSSDProvider) updatesToCreates(changes *plan.Changes) (creates []*endp
 	for _, old := range changes.UpdateOld {
 		current := updateNewMap[old.DNSName]
 
+		// always register (or re-register) instance with the current data
+		creates = append(creates, current)
+
 		if !old.Targets.Same(current.Targets) {
 			// when targets differ the old instances need to be de-registered first
 			deletes = append(deletes, old)
+			// remove from both current.Targets and create.Targets the targets that appear in both of them
+			p.DedupDeletesAndCreates(current, old)
 		}
-
-		// always register (or re-register) instance with the current data
-		creates = append(creates, current)
 	}
 
 	return creates, deletes
@@ -954,69 +950,35 @@ func (p *AWSSDProvider) RemoveServiceAndInstances(svc *sd.Service) error {
 // These targets are redundant and result in overlapping API calls. Without deduplication, RegisterInstance could be
 // invoked while DeregisterInstance is still in progress in AWS, resulting in failure to register the instance, and
 // therefore in service disruption. Redundant targets may have been introduced by updatesToCreates.
-func (p *AWSSDProvider) DedupDeletesAndCreates(creates []*endpoint.Endpoint, deletes []*endpoint.Endpoint) ([]*endpoint.Endpoint, []*endpoint.Endpoint, error) {
-	// contains all targets appearing in "deletes", mapped by the DNS name of the respective endpoint
-	targetsByDeleteEp := map[string]map[string]bool{}
-	// contains all duplicate targets (appearing in both "deletes" and "creates"), mapped by the DNS name of the respective endpoint
-	dupTargetsByEp := map[string]map[string]bool{}
+func (p *AWSSDProvider) DedupDeletesAndCreates(create *endpoint.Endpoint, delete *endpoint.Endpoint) {
+	// contains all duplicate targets (appearing in both "deletes" and "creates")
+	dupTargets := make([]string, 0)
 
-	// populate targetsByDeleteEp
-	for _, e := range deletes {
-		if targetsByDeleteEp[e.DNSName] == nil {
-			targetsByDeleteEp[e.DNSName] = map[string]bool{}
-		}
-		for _, t := range e.Targets {
-			if _, ok := targetsByDeleteEp[e.DNSName][t]; !ok {
-				targetsByDeleteEp[e.DNSName][t] = true
-			}
+	// i is the length of the deduplicated targets for the endpoint (initial targets count - duplicate targets count)
+	i := 0
+	// loop all targets
+	for _, createTarget := range create.Targets {
+		// if the target is not duplicate
+		if !sliceContainsString(delete.Targets, createTarget) {
+			// copy the target and increment i
+			create.Targets[i] = createTarget
+			i++
+			// if the target is duplicate, add it to dupTargetsByEp
+		} else {
+			dupTargets = append(dupTargets, createTarget)
 		}
 	}
+	// cut the slice up to i (count of deduplicated targets)
+	create.Targets = create.Targets[:i]
 
-	// loop create endpoints and remove duplicate targets
-	for _, create := range creates {
-		// if no delete endpoint for this DNS name, then skip this endpoint
-		if targetsByDeleteEp[create.DNSName] == nil {
-			continue
+	i = 0
+	for _, deleteTarget := range delete.Targets {
+		if !sliceContainsString(dupTargets, deleteTarget) {
+			delete.Targets[i] = deleteTarget
+			i++
 		}
-		TargetsDelete := targetsByDeleteEp[create.DNSName]
-		// i is the length of the deduplicated targets for the endpoint (initial targets count - duplicate targets count)
-		i := 0
-		// loop all targets in this endpoint
-		for _, createTarget := range create.Targets {
-			// if the target is not duplicate
-			if _, ok := TargetsDelete[createTarget]; !ok {
-				// copy the target and increment i
-				create.Targets[i] = createTarget
-				i++
-				// if the target is duplicate, add it to dupTargetsByEp
-			} else {
-				if dupTargetsByEp[create.DNSName] == nil {
-					dupTargetsByEp[create.DNSName] = map[string]bool{}
-				}
-				dupTargetsByEp[create.DNSName][createTarget] = true
-			}
-		}
-		// cut the slice up to i (count of deduplicated targets)
-		create.Targets = create.Targets[:i]
 	}
-
-	// loop delete endpoints and remove duplicate targets
-	for _, delete := range deletes {
-		if dupTargetsByEp[delete.DNSName] == nil {
-			continue
-		}
-		TargetsDup := dupTargetsByEp[delete.DNSName]
-		i := 0
-		for _, deleteTarget := range delete.Targets {
-			if _, ok := TargetsDup[deleteTarget]; !ok {
-				delete.Targets[i] = deleteTarget
-				i++
-			}
-		}
-		delete.Targets = delete.Targets[:i]
-	}
-
-	return creates, deletes, nil
+	delete.Targets = delete.Targets[:i]
 }
 
 // Instance ID length is limited by AWS API to 64 characters. For longer strings SHA-256 hash will be used instead of
@@ -1251,4 +1213,14 @@ func sliceRemoveEmptyEp(ep []*endpoint.Endpoint) []*endpoint.Endpoint {
 		}
 	}
 	return ep
+}
+
+// sliceContainsString determines if a given slice of strings contains a given string.
+func sliceContainsString(slice []string, val string) bool {
+	for _, item := range slice {
+		if item == val {
+			return true
+		}
+	}
+	return false
 }
