@@ -72,10 +72,6 @@ func (s *AWSSDClientStub) CreateService(input *sd.CreateServiceInput) (*sd.Creat
 	}, nil
 }
 
-func (s *AWSSDClientStub) DeleteService(input *sd.DeleteServiceInput) (*sd.DeleteServiceOutput, error) {
-	return &sd.DeleteServiceOutput{}, nil
-}
-
 func (s *AWSSDClientStub) DeregisterInstance(input *sd.DeregisterInstanceInput) (*sd.DeregisterInstanceOutput, error) {
 	serviceInstances := s.instances[*input.ServiceId]
 	delete(serviceInstances, *input.InstanceId)
