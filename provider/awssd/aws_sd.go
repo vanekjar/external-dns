@@ -938,13 +938,16 @@ func (p *AWSSDProvider) RemoveServiceAndInstances(svc *sd.Service) error {
 			return err
 		}
 	}
-	log.Infof("Deleting a service \"%s\" (%s)", *svc.Name, *svc.Id)
-	if !p.dryRun {
-		_, err := p.client.DeleteService(&sd.DeleteServiceInput{
-			Id: svc.Id,
-		})
-		if err != nil {
-			return err
+	// service can be deleted only when all instances have been deleted. otherwise, Cloud Map will error.
+	if len(instances) == 0 {
+		log.Infof("Deleting a service \"%s\" (%s)", *svc.Name, *svc.Id)
+		if !p.dryRun {
+			_, err := p.client.DeleteService(&sd.DeleteServiceInput{
+				Id: svc.Id,
+			})
+			if err != nil {
+				return err
+			}
 		}
 	}
 
