@@ -95,6 +95,13 @@ type AWSSDProvider struct {
 	namespaceTypeFilter *sd.NamespaceFilter
 }
 
+// a struct of all related relevant changes to handle SRV endpoints.
+type SRVRelevantChanges struct {
+	ACre   []*endpoint.Endpoint // max len is 1. This is a create endpoint with recordType A
+	SRVCre []*endpoint.Endpoint // max len is 1. This is a delete endpoint with recordType SRV
+	SRVDel []*endpoint.Endpoint // max len is n. These are delete endpoints with recordType SRV
+}
+
 // NewAWSSDProvider initializes a new AWS Cloud Map based Provider.
 func NewAWSSDProvider(domainFilter endpoint.DomainFilter, namespaceType string, assumeRole string, dryRun bool) (*AWSSDProvider, error) {
 	config := aws.NewConfig()
@@ -313,14 +320,9 @@ func (p *AWSSDProvider) updatesToCreates(changes *plan.Changes) (creates []*endp
 	return creates, deletes
 }
 
-// handles SRV changes. It links related A and SRV endpoints together (in the internal relevantChanges struct).
+// handleSRVChanges updates A endpoints to include the SRV logic. This is needed because A and SRV are handled as an atomic A+SRV service in Cloud Map.
+// therefore, properties of related A and SRV endpoints need to be consolidated in a unique endpoint in order to be handled by Cloud Map as a unique operation later.
 func (p *AWSSDProvider) handleSRVChanges(namespaces []*sd.NamespaceSummary, creates []*endpoint.Endpoint, deletes []*endpoint.Endpoint) ([]*endpoint.Endpoint, []*endpoint.Endpoint, error) {
-	// an internal struct of all related relevant changes to handle SRV endpoints.
-	type relevantChanges struct {
-		ACre   []*endpoint.Endpoint // max len is 1. This is a create endpoint with recordType A
-		SRVCre []*endpoint.Endpoint // max len is 1. This is a delete endpoint with recordType SRV
-		SRVDel []*endpoint.Endpoint // max len is n. These are delete endpoints with recordType SRV
-	}
 
 	createsByNamespaceID := p.changesByNamespaceID(namespaces, creates)
 	deletesByNamespaceID := p.changesByNamespaceID(namespaces, deletes)
@@ -339,170 +341,51 @@ func (p *AWSSDProvider) handleSRVChanges(namespaces []*sd.NamespaceSummary, crea
 			return nil, nil, err
 		}
 
-		//create a map of relevant changes by host. will loop this map later to determine any SRV-related changes
-		changesByHost := make(map[string]*relevantChanges)
-		for _, ch := range nsCreates {
-			// Cloud Map supports 1 SRV endpoint per host. Therefore, add only the first SRV endpoint per host to the "changesByHost" object.
-			// This means that any SRV endpoint on the same host (after the first) is ignored.
-			// The 1st SRV endpoint is added to "SRVCre" under "changesByHost". Will be used later to check if an SRV service needs to be created/updated.
-			if ch.RecordType == endpoint.RecordTypeSRV {
-				// the target host of the SRV endpoint is the element that links the SRV endpoint to the related A endpoint.
-				// The target host of the SRV endpoint is equal to the DNS Name of the related A endpoint.
-				_, host, _, _, err := p.srvHostTargetSplit(ch.Targets[0])
-				if err != nil {
-					return nil, nil, err
-				}
-				if _, ok := changesByHost[host]; !ok {
-					changesByHost[host] = &relevantChanges{}
-				}
-				chByHost := changesByHost[host]
-				// only consider 1 SRV create endpoint by host. Any other SRV create endpoint with the same host will be ignored.
-				if len(chByHost.SRVCre) == 0 {
-					chByHost.SRVCre = append(chByHost.SRVCre, ch)
-				}
-
-				// 1 A endpoint per host is expected. Therefore, add only the first A endpoint per host to the "changesByHost" object.
-				// This means that any A endpoint on the same host (after the first) is ignored.
-				// The 1st A endpoint is added to "ACre" under "changesByHost". Will be used later to check if an A service needs to be created/updated, and if it has a related SRV endpoint.
-			} else if ch.RecordType == endpoint.RecordTypeA {
-				host := ch.DNSName
-				if _, ok := changesByHost[host]; !ok {
-					changesByHost[host] = &relevantChanges{}
-				}
-				chByHost := changesByHost[host]
-				// only consider 1 A create endpoint by host. 1 A endpoint only is expected for 1 host. If this is not the case, emit a warn.
-				if len(chByHost.ACre) == 0 {
-					chByHost.ACre = append(chByHost.ACre, ch)
-				} else {
-					log.Warnf("Skipping endpoint %s because only 1 create change is expected for A endpoint. This is unexpected.", ch.String())
-				}
-			}
-		}
-		for _, ch := range nsDeletes {
-			// SRV endpoints are added to "SRVDel" under "changesByHost". Will be used later to check if an existing A+SRV service needs to be deleted/updated.
-			if ch.RecordType == endpoint.RecordTypeSRV {
-				_, host, _, _, err := p.srvHostTargetSplit(ch.Targets[0])
-				if err != nil {
-					return nil, nil, err
-				}
-				if _, ok := changesByHost[host]; !ok {
-					changesByHost[host] = &relevantChanges{}
-				}
-				chByHost := changesByHost[host]
-				chByHost.SRVDel = append(chByHost.SRVDel, ch)
-			}
+		//create a map of relevant changes by host. It contains the following endpoints: A create, SRV create, and SRV delete.
+		// A & SRV endpoints are registered as a unified A+SRV service in Cloud Map. Therefore, this map is needed to evaluate changes to the A+SRV service.
+		changesByHost := make(map[string]*SRVRelevantChanges)
+		err = p.SRVPopulateChangesByHost(changesByHost, nsCreates, nsDeletes)
+		if err != nil {
+			return nil, nil, err
 		}
 
-		// loop the map of relevant changes by host
+		// loop by host the map of relevant changes
 		for host, relCh := range changesByHost {
-			_, svcName := p.parseHostname(host)
 
-			// define some relevant variables for handling the host-level changes
-			ASvc, ASvcExists := services[svcName]
-			var ASvcIsAAndSRV bool
-			if ASvcExists && p.isAAndSRVService(ASvc) {
-				ASvcIsAAndSRV = true
-			} else {
-				ASvcIsAAndSRV = false
-			}
-			var ACreExists bool
-			if len(relCh.ACre) == 1 {
-				ACreExists = true
-			} else {
-				ACreExists = false
-			}
-			var SRVCreExists bool
-			if len(relCh.SRVCre) == 1 {
-				SRVCreExists = true
-			} else {
-				SRVCreExists = false
-			}
-			var ACre *endpoint.Endpoint
-			if ACreExists {
-				ACre = relCh.ACre[0]
-			}
-			var SRVCre *endpoint.Endpoint
-			if SRVCreExists {
-				SRVCre = relCh.SRVCre[0]
-			}
-			SRVDeletes := relCh.SRVDel
-			var ASvcCurrentPrefSRV string
-			var ASvcCurrentPort string
-			if ASvcIsAAndSRV {
-				ASvcCurrentPrefSRV, _, err = p.srvDescrSplit(aws.StringValue(ASvc.Description))
-				if err != nil {
-					return nil, nil, err
-				}
-				_, _, _, _, ASvcCurrentPort, err = p.preferredSRVSplit(ASvcCurrentPrefSRV)
-				if err != nil {
-					return nil, nil, err
-				}
-			}
-			var SRVCrePrefSRV string
-			if SRVCreExists {
-				SRVCrePrefSRV, err = p.preferredSRVCombine(SRVCre.DNSName, SRVCre.RecordTTL, SRVCre.Targets[0])
-				if err != nil {
-					return nil, nil, err
-				}
+			// SRVDetermineActions calculates actions to be performed & other variables
+			ASvcExists, ASvcRemove, ACreExists, ASvcIsAAndSRV, ASvc, ACre, ASvcCurrentPrefSRV, newPrefSRV, err := p.SRVDetermineActions(host, relCh, services)
+			if err != nil {
+				return nil, nil, err
 			}
 
-			// set the outputs of the main if-block
-			ASvcRemove := false
-			newPrefSRV := ""
-
-			//run the main if-block
-			if ASvcExists {
-				if ASvcIsAAndSRV {
-					deleteCurrPrefSRV := false
-					for _, SRVDel := range SRVDeletes {
-						SRVDelPort, _, _, _, err := p.srvHostTargetSplit(SRVDel.Targets[0])
-						if err != nil {
-							return nil, nil, err
-						}
-						SRVDelPrefSRV, err := p.preferredSRVCombine(SRVDel.DNSName, SRVDel.RecordTTL, SRVDel.Targets[0])
-						if err != nil {
-							return nil, nil, err
-						}
-
-						if SRVDelPort != ASvcCurrentPort {
-							err = p.DeleteSrvEp(SRVDel, ASvc)
-						} else if SRVDelPrefSRV == ASvcCurrentPrefSRV {
-							if SRVCreExists {
-								deleteCurrPrefSRV = true
-							} else {
-								ASvcRemove = true
-							}
-						}
-					}
-					if deleteCurrPrefSRV {
-						newPrefSRV = SRVCrePrefSRV
-					}
-				} else if SRVCreExists {
-					ASvcRemove = true
-				}
-			} else if SRVCreExists && ACreExists {
-				newPrefSRV = SRVCrePrefSRV
-			}
-
-			// set values to be returned
+			// [case 1] When an A service exists and needs to be removed. this happens when the old A service is A (or A+SRV) while the new one is A+SRV (or A)
+			// Removal is needed because you cannot update the DnsConfig list in Cloud Map. You need to delete & re-create the service
 			if ASvcRemove {
+				// remove the A service
 				err = p.RemoveServiceAndInstances(ASvc)
 				if err != nil {
 					return nil, nil, err
 				}
 				emptyEp := &endpoint.Endpoint{}
+				// if an A create exists, remove it to avoid instances being re-registered.
+				// this is needed to allow full de-registration of an A or A+SRV service before it's recreated with a different DnsConfig list (A+SRV or A)
 				*ACre = *emptyEp
+
+				// [case 2] When an A service is new or exists as an A+SRV, and the related SRV has changed (newPrefSRV != ""). In this case, the SRV part of the A+SRV service needs to be udpated.
+				// The update to the A+SRV record is planned by setting the label labelPreferredSRV in the A create endpoint.
 			} else if newPrefSRV != "" {
 				if ACreExists {
 					ACre.Labels[labelPreferredSRV] = newPrefSRV
+					//if A create endpoint doesn't exist, then create one. This endpoint is needed to trigger the update of the A+SRV service
 				} else if ASvcExists {
 					newACreate := p.SvcToEpNewPrefSrv(ns, ASvc, newPrefSRV)
 					creates = append(creates, newACreate)
 				}
 
+				// [case 3] When an A+SRV service exists, and the A part but not the SRV part needs to be updated, then the labelPreferredSRV label should be set on the A create endpoint.
+				// this is needed to make sure that the A endpoint is treated as an A+SRV endpoint later during update (not as an A endpoint).
 			} else if ASvcExists && ASvcIsAAndSRV && ACreExists {
 				ACre.Labels[labelPreferredSRV] = ASvcCurrentPrefSRV
-			} else {
 			}
 		}
 	}
@@ -512,6 +395,63 @@ func (p *AWSSDProvider) handleSRVChanges(namespaces []*sd.NamespaceSummary, crea
 	return creates, deletes, nil
 }
 
+// populate a map of relevant changes of related A and SRV records. This way, A and SRV records can be handled together.
+func (p *AWSSDProvider) SRVPopulateChangesByHost(changesByHost map[string]*SRVRelevantChanges, nsCreates []*endpoint.Endpoint, nsDeletes []*endpoint.Endpoint) error {
+	for _, ch := range nsCreates {
+		// Cloud Map supports 1 SRV endpoint per host. Therefore, add only the first SRV endpoint per host to the "changesByHost" object.
+		// This means that any SRV endpoint on the same host (after the first) is ignored.
+		// The 1st SRV endpoint is added to "SRVCre" under "changesByHost". Will be used later to check if an SRV service needs to be created/updated.
+		if ch.RecordType == endpoint.RecordTypeSRV {
+			// the target host of the SRV endpoint is the element that links the SRV endpoint to the related A endpoint.
+			// The target host of the SRV endpoint is equal to the DNS Name of the related A endpoint.
+			_, host, _, _, err := p.srvHostTargetSplit(ch.Targets[0])
+			if err != nil {
+				return err
+			}
+			if _, ok := changesByHost[host]; !ok {
+				changesByHost[host] = &SRVRelevantChanges{}
+			}
+			chByHost := changesByHost[host]
+			// only consider 1 SRV create endpoint by host. Any other SRV create endpoint with the same host will be ignored.
+			if len(chByHost.SRVCre) == 0 {
+				chByHost.SRVCre = append(chByHost.SRVCre, ch)
+			}
+
+			// 1 A endpoint per host is expected. Therefore, add only the first A endpoint per host to the "changesByHost" object.
+			// This means that any A endpoint on the same host (after the first) is ignored.
+			// The 1st A endpoint is added to "ACre" under "changesByHost". Will be used later to check if an A service needs to be created/updated, and if it has a related SRV endpoint.
+		} else if ch.RecordType == endpoint.RecordTypeA {
+			host := ch.DNSName
+			if _, ok := changesByHost[host]; !ok {
+				changesByHost[host] = &SRVRelevantChanges{}
+			}
+			chByHost := changesByHost[host]
+			// only consider 1 A create endpoint by host. 1 A endpoint only is expected for 1 host. If this is not the case, emit a warn.
+			if len(chByHost.ACre) == 0 {
+				chByHost.ACre = append(chByHost.ACre, ch)
+			} else {
+				log.Warnf("Skipping endpoint %s because only 1 create change is expected for A endpoint. This is unexpected.", ch.String())
+			}
+		}
+	}
+	for _, ch := range nsDeletes {
+		// SRV endpoints are added to "SRVDel" under "changesByHost". Will be used later to check if an existing A+SRV service needs to be deleted/updated.
+		if ch.RecordType == endpoint.RecordTypeSRV {
+			_, host, _, _, err := p.srvHostTargetSplit(ch.Targets[0])
+			if err != nil {
+				return err
+			}
+			if _, ok := changesByHost[host]; !ok {
+				changesByHost[host] = &SRVRelevantChanges{}
+			}
+			chByHost := changesByHost[host]
+			chByHost.SRVDel = append(chByHost.SRVDel, ch)
+		}
+	}
+	return nil
+}
+
+// when an A+SRV service needs to be updated and there is no change to A (but only to SRV), then the A change endpoint is created by this function using values from the existing A service.
 func (p *AWSSDProvider) SvcToEpNewPrefSrv(ns *sd.NamespaceSummary, srv *sd.Service, labPrefSRV string) *endpoint.Endpoint {
 	recordName := *srv.Name + "." + *ns.Name
 
@@ -532,6 +472,94 @@ func (p *AWSSDProvider) SvcToEpNewPrefSrv(ns *sd.NamespaceSummary, srv *sd.Servi
 	}
 
 	return newEndpoint
+}
+
+// this function determines the actions to be taken on an SRV record
+func (p *AWSSDProvider) SRVDetermineActions(host string, relCh *SRVRelevantChanges, services map[string]*sd.Service) (ASvcExists bool, ASvcRemove bool, ACreExists bool, ASvcIsAAndSRV bool,
+	ASvc *sd.Service, ACre *endpoint.Endpoint, ASvcCurrentPrefSRV string, newPrefSRV string, err error) {
+
+	_, svcName := p.parseHostname(host)
+	// define some relevant variables for handling the host-level changes
+	ASvc, ASvcExists = services[svcName]
+	if ASvcExists && p.isAAndSRVService(ASvc) {
+		ASvcIsAAndSRV = true
+	} else {
+		ASvcIsAAndSRV = false
+	}
+	if len(relCh.ACre) == 1 {
+		ACreExists = true
+	} else {
+		ACreExists = false
+	}
+	var SRVCreExists bool
+	if len(relCh.SRVCre) == 1 {
+		SRVCreExists = true
+	} else {
+		SRVCreExists = false
+	}
+	if ACreExists {
+		ACre = relCh.ACre[0]
+	}
+	var SRVCre *endpoint.Endpoint
+	if SRVCreExists {
+		SRVCre = relCh.SRVCre[0]
+	}
+	SRVDeletes := relCh.SRVDel
+	var ASvcCurrentPort string
+	if ASvcIsAAndSRV {
+		ASvcCurrentPrefSRV, _, err = p.srvDescrSplit(aws.StringValue(ASvc.Description))
+		if err != nil {
+			return
+		}
+		_, _, _, _, ASvcCurrentPort, err = p.preferredSRVSplit(ASvcCurrentPrefSRV)
+		if err != nil {
+			return
+		}
+	}
+	var SRVCrePrefSRV string
+	if SRVCreExists {
+		SRVCrePrefSRV, err = p.preferredSRVCombine(SRVCre.DNSName, SRVCre.RecordTTL, SRVCre.Targets[0])
+		if err != nil {
+			return
+		}
+	}
+
+	//run the main if-block
+	if ASvcExists {
+		if ASvcIsAAndSRV {
+			deleteCurrPrefSRV := false
+			for _, SRVDel := range SRVDeletes {
+				var SRVDelPort string
+				SRVDelPort, _, _, _, err = p.srvHostTargetSplit(SRVDel.Targets[0])
+				if err != nil {
+					return
+				}
+				var SRVDelPrefSRV string
+				SRVDelPrefSRV, err = p.preferredSRVCombine(SRVDel.DNSName, SRVDel.RecordTTL, SRVDel.Targets[0])
+				if err != nil {
+					return
+				}
+
+				if SRVDelPort != ASvcCurrentPort {
+					err = p.DeleteSrvEp(SRVDel, ASvc)
+				} else if SRVDelPrefSRV == ASvcCurrentPrefSRV {
+					if SRVCreExists {
+						deleteCurrPrefSRV = true
+					} else {
+						ASvcRemove = true
+					}
+				}
+			}
+			if deleteCurrPrefSRV {
+				newPrefSRV = SRVCrePrefSRV
+			}
+		} else if SRVCreExists {
+			ASvcRemove = true
+		}
+	} else if SRVCreExists && ACreExists {
+		newPrefSRV = SRVCrePrefSRV
+	}
+	return
 }
 
 func (p *AWSSDProvider) submitCreates(namespaces []*sd.NamespaceSummary, changes []*endpoint.Endpoint) error {
