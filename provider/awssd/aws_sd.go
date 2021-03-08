@@ -479,7 +479,8 @@ func (p *AWSSDProvider) SRVDetermineActions(host string, relCh *SRVRelevantChang
 	ASvc *sd.Service, ACre *endpoint.Endpoint, ASvcCurrentPrefSRV string, newPrefSRV string, err error) {
 
 	_, svcName := p.parseHostname(host)
-	// define some relevant variables for handling the host-level changes
+	// define some relevant input variables for handling the host-level changes
+	// based on these variables, we
 	ASvc, ASvcExists = services[svcName]
 	if ASvcExists && p.isAAndSRVService(ASvc) {
 		ASvcIsAAndSRV = true
@@ -524,10 +525,10 @@ func (p *AWSSDProvider) SRVDetermineActions(host string, relCh *SRVRelevantChang
 		}
 	}
 
-	//run the main if-block
+	// determine the actions that will be taken based on current and expected state
 	if ASvcExists {
 		if ASvcIsAAndSRV {
-			deleteCurrPrefSRV := false
+			// loop all SRV delete endpoints
 			for _, SRVDel := range SRVDeletes {
 				var SRVDelPort string
 				SRVDelPort, _, _, _, err = p.srvHostTargetSplit(SRVDel.Targets[0])
@@ -541,22 +542,32 @@ func (p *AWSSDProvider) SRVDetermineActions(host string, relCh *SRVRelevantChang
 				}
 
 				if SRVDelPort != ASvcCurrentPort {
+					// [1] When an A+SRV service exists, and an SRV delete endpoint exists with port different from the expected port of the A+SRV service.
+					// Then remove all instances with the non-expected port from the A+SRV service
 					err = p.DeleteSrvEp(SRVDel, ASvc)
+					if err != nil {
+						return
+					}
 				} else if SRVDelPrefSRV == ASvcCurrentPrefSRV {
 					if SRVCreExists {
-						deleteCurrPrefSRV = true
+						// [2] When an A+SRV service exists, an SRV delete endpoint exists for the SRV portion of the service, and a new SRV create endpoint exists.
+						// Then we will keep the A+SRV service, and we will update the SRV portion of it.
+						newPrefSRV = SRVCrePrefSRV
 					} else {
+						// [3] When an A+SRV service exists, an SRV delete endpoint exists for the SRV portion of the service, and a new SRV create endpoint doesn't exist.
+						// Then we will remove the A+SRV service, because Cloud Map does not support changing A+SRV services to A services.
 						ASvcRemove = true
 					}
 				}
 			}
-			if deleteCurrPrefSRV {
-				newPrefSRV = SRVCrePrefSRV
-			}
 		} else if SRVCreExists {
+			// [4] When an A-only service exists and an SRV create edpoint exist.
+			// Then we will remove the A-only service, because Cloud Map does not support changing A services to A+SRV services.
 			ASvcRemove = true
 		}
 	} else if SRVCreExists && ACreExists {
+		// [5] When an A or A+SRV service doesn't exists, and SRV & A create endpoint exists.
+		// Then we will create an A+SRV service.
 		newPrefSRV = SRVCrePrefSRV
 	}
 	return
