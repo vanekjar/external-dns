@@ -11,7 +11,7 @@ Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
-limitations under the License..
+limitations under the License.
 */
 
 package awssd
@@ -52,7 +52,7 @@ const (
 	sdInstanceAttrAlias = "AWS_ALIAS_DNS_NAME"
 	sdInstanceAttrPort  = "AWS_INSTANCE_PORT"
 
-	labelPreferredSRV = "awssd-preferred-srv"
+	labelCorrespondingSRV = "awssd-corresponding-srv"
 )
 
 var (
@@ -66,8 +66,8 @@ var (
 	// as originally sourced by external-dns to ApplyChanges.
 	sdSrvHostTargetRegex = regexp.MustCompile(`^[0-9]{1,5} [0-9]{1,5} [0-9]{1,5} [^\s]+$`)
 
-	// matches the format for the preferred SRV target of an A record. Format: "hostname TTL IN SRV priority weight port", e.g. "_srv._tcp.example.com 86400 IN SRV 0 50 80",
-	sdPreferredSRVRegex = regexp.MustCompile(`^[^\s]+ [0-9]{1,10} IN SRV [0-9]{1,5} [0-9]{1,5} [0-9]{1,5}$`)
+	// matches the format for the corresponding SRV target of an A record. Format: "hostname TTL IN SRV priority weight port", e.g. "_srv._tcp.example.com 86400 IN SRV 0 50 80",
+	sdCorrespondingSRVRegex = regexp.MustCompile(`^[^\s]+ [0-9]{1,10} IN SRV [0-9]{1,5} [0-9]{1,5} [0-9]{1,5}$`)
 )
 
 // AWSSDClient is the subset of the AWS Cloud Map API that we actually use. Add methods as required.
@@ -97,8 +97,8 @@ type AWSSDProvider struct {
 
 // a struct of all related relevant changes to handle SRV endpoints.
 type SRVRelevantChanges struct {
-	ACre   []*endpoint.Endpoint // max len is 1. This is a create endpoint with recordType A
-	SRVCre []*endpoint.Endpoint // max len is 1. This is a delete endpoint with recordType SRV
+	ACre   *endpoint.Endpoint   // This is a create endpoint with recordType A
+	SRVCre *endpoint.Endpoint   // This is a delete endpoint with recordType SRV
 	SRVDel []*endpoint.Endpoint // max len is n. These are delete endpoints with recordType SRV
 }
 
@@ -195,12 +195,12 @@ func (p *AWSSDProvider) instancesToEndpoint(ns *sd.NamespaceSummary, srv *sd.Ser
 	srvDescr := aws.StringValue(srv.Description)
 	isAAndSRV := p.isAAndSRVService(srv)
 	portsList := make([]string, 0, len(instances))
-	prefSrv := ""
+	corrSrv := ""
 	mainDnsRecord := p.mainDnsRecord(srv)
 
 	if isAAndSRV {
 		// if record type is A+SRV, parse the description field
-		prefSrv, srvDescr, _ = p.srvDescrSplit(aws.StringValue(srv.Description))
+		corrSrv, srvDescr, _ = p.srvDescrSplit(aws.StringValue(srv.Description))
 	}
 
 	labels[endpoint.AWSSDDescriptionLabel] = srvDescr
@@ -239,7 +239,7 @@ func (p *AWSSDProvider) instancesToEndpoint(ns *sd.NamespaceSummary, srv *sd.Ser
 	if isAAndSRV {
 		// if record type is A+SRV, return also SRV endpoints
 		portsList := sliceDedup(portsList)
-		srvDnsName, ttl, prio, weight, _, _ := p.preferredSRVSplit(prefSrv)
+		srvDnsName, ttl, prio, weight, _, _ := p.correspondingSRVSplit(corrSrv)
 		for _, port := range portsList {
 
 			labelsSrv := endpoint.NewLabels()
@@ -343,8 +343,7 @@ func (p *AWSSDProvider) handleSRVChanges(namespaces []*sd.NamespaceSummary, crea
 
 		//create a map of relevant changes by host. It contains the following endpoints: A create, SRV create, and SRV delete.
 		// A & SRV endpoints are registered as a unified A+SRV service in Cloud Map. Therefore, this map is needed to evaluate changes to the A+SRV service.
-		changesByHost := make(map[string]*SRVRelevantChanges)
-		err = p.SRVPopulateChangesByHost(changesByHost, nsCreates, nsDeletes)
+		changesByHost, err := p.SRVPopulateChangesByHost(nsCreates, nsDeletes)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -372,20 +371,20 @@ func (p *AWSSDProvider) handleSRVChanges(namespaces []*sd.NamespaceSummary, crea
 				*ACre = *emptyEp
 
 				// [case 2] When an A service is new or exists as an A+SRV, and the related SRV has changed (newPrefSRV != ""). In this case, the SRV part of the A+SRV service needs to be udpated.
-				// The update to the A+SRV record is planned by setting the label labelPreferredSRV in the A create endpoint.
+				// The update to the A+SRV record is planned by setting the label labelCorrespondingSRV in the A create endpoint.
 			} else if newPrefSRV != "" {
 				if ACreExists {
-					ACre.Labels[labelPreferredSRV] = newPrefSRV
+					ACre.Labels[labelCorrespondingSRV] = newPrefSRV
 					//if A create endpoint doesn't exist, then create one. This endpoint is needed to trigger the update of the A+SRV service
 				} else if ASvcExists {
 					newACreate := p.SvcToEpNewPrefSrv(ns, ASvc, newPrefSRV)
 					creates = append(creates, newACreate)
 				}
 
-				// [case 3] When an A+SRV service exists, and the A part but not the SRV part needs to be updated, then the labelPreferredSRV label should be set on the A create endpoint.
+				// [case 3] When an A+SRV service exists, and the A part but not the SRV part needs to be updated, then the labelCorrespondingSRV label should be set on the A create endpoint.
 				// this is needed to make sure that the A endpoint is treated as an A+SRV endpoint later during update (not as an A endpoint).
 			} else if ASvcExists && ASvcIsAAndSRV && ACreExists {
-				ACre.Labels[labelPreferredSRV] = ASvcCurrentPrefSRV
+				ACre.Labels[labelCorrespondingSRV] = ASvcCurrentPrefSRV
 			}
 		}
 	}
@@ -396,7 +395,8 @@ func (p *AWSSDProvider) handleSRVChanges(namespaces []*sd.NamespaceSummary, crea
 }
 
 // populate a map of relevant changes of related A and SRV records. This way, A and SRV records can be handled together.
-func (p *AWSSDProvider) SRVPopulateChangesByHost(changesByHost map[string]*SRVRelevantChanges, nsCreates []*endpoint.Endpoint, nsDeletes []*endpoint.Endpoint) error {
+func (p *AWSSDProvider) SRVPopulateChangesByHost(nsCreates []*endpoint.Endpoint, nsDeletes []*endpoint.Endpoint) (changesByHost map[string]*SRVRelevantChanges, err error) {
+	changesByHost = make(map[string]*SRVRelevantChanges)
 	for _, ch := range nsCreates {
 		// Cloud Map supports 1 SRV endpoint per host. Therefore, add only the first SRV endpoint per host to the "changesByHost" object.
 		// This means that any SRV endpoint on the same host (after the first) is ignored.
@@ -406,15 +406,15 @@ func (p *AWSSDProvider) SRVPopulateChangesByHost(changesByHost map[string]*SRVRe
 			// The target host of the SRV endpoint is equal to the DNS Name of the related A endpoint.
 			_, host, _, _, err := p.srvHostTargetSplit(ch.Targets[0])
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if _, ok := changesByHost[host]; !ok {
 				changesByHost[host] = &SRVRelevantChanges{}
 			}
 			chByHost := changesByHost[host]
 			// only consider 1 SRV create endpoint by host. Any other SRV create endpoint with the same host will be ignored.
-			if len(chByHost.SRVCre) == 0 {
-				chByHost.SRVCre = append(chByHost.SRVCre, ch)
+			if chByHost.SRVCre == nil {
+				chByHost.SRVCre = ch
 			}
 
 			// 1 A endpoint per host is expected. Therefore, add only the first A endpoint per host to the "changesByHost" object.
@@ -427,8 +427,8 @@ func (p *AWSSDProvider) SRVPopulateChangesByHost(changesByHost map[string]*SRVRe
 			}
 			chByHost := changesByHost[host]
 			// only consider 1 A create endpoint by host. 1 A endpoint only is expected for 1 host. If this is not the case, emit a warn.
-			if len(chByHost.ACre) == 0 {
-				chByHost.ACre = append(chByHost.ACre, ch)
+			if chByHost.ACre == nil {
+				chByHost.ACre = ch
 			} else {
 				log.Warnf("Skipping endpoint %s because only 1 create change is expected for A endpoint. This is unexpected.", ch.String())
 			}
@@ -439,7 +439,7 @@ func (p *AWSSDProvider) SRVPopulateChangesByHost(changesByHost map[string]*SRVRe
 		if ch.RecordType == endpoint.RecordTypeSRV {
 			_, host, _, _, err := p.srvHostTargetSplit(ch.Targets[0])
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if _, ok := changesByHost[host]; !ok {
 				changesByHost[host] = &SRVRelevantChanges{}
@@ -448,7 +448,7 @@ func (p *AWSSDProvider) SRVPopulateChangesByHost(changesByHost map[string]*SRVRe
 			chByHost.SRVDel = append(chByHost.SRVDel, ch)
 		}
 	}
-	return nil
+	return changesByHost, nil
 }
 
 // when an A+SRV service needs to be updated and there is no change to A (but only to SRV), then the A change endpoint is created by this function using values from the existing A service.
@@ -459,7 +459,7 @@ func (p *AWSSDProvider) SvcToEpNewPrefSrv(ns *sd.NamespaceSummary, srv *sd.Servi
 
 	labels := endpoint.NewLabels()
 	labels[endpoint.AWSSDDescriptionLabel] = srvDescr
-	labels[labelPreferredSRV] = labPrefSRV
+	labels[labelCorrespondingSRV] = labPrefSRV
 
 	mainDnsRecord := p.mainDnsRecord(srv)
 
@@ -480,30 +480,29 @@ func (p *AWSSDProvider) SRVDetermineActions(host string, relCh *SRVRelevantChang
 
 	_, svcName := p.parseHostname(host)
 	// define some relevant input variables for handling the host-level changes
-	// based on these variables, we
 	ASvc, ASvcExists = services[svcName]
 	if ASvcExists && p.isAAndSRVService(ASvc) {
 		ASvcIsAAndSRV = true
 	} else {
 		ASvcIsAAndSRV = false
 	}
-	if len(relCh.ACre) == 1 {
+	if relCh.ACre != nil {
 		ACreExists = true
 	} else {
 		ACreExists = false
 	}
 	var SRVCreExists bool
-	if len(relCh.SRVCre) == 1 {
+	if relCh.SRVCre != nil {
 		SRVCreExists = true
 	} else {
 		SRVCreExists = false
 	}
 	if ACreExists {
-		ACre = relCh.ACre[0]
+		ACre = relCh.ACre
 	}
 	var SRVCre *endpoint.Endpoint
 	if SRVCreExists {
-		SRVCre = relCh.SRVCre[0]
+		SRVCre = relCh.SRVCre
 	}
 	SRVDeletes := relCh.SRVDel
 	var ASvcCurrentPort string
@@ -512,14 +511,14 @@ func (p *AWSSDProvider) SRVDetermineActions(host string, relCh *SRVRelevantChang
 		if err != nil {
 			return
 		}
-		_, _, _, _, ASvcCurrentPort, err = p.preferredSRVSplit(ASvcCurrentPrefSRV)
+		_, _, _, _, ASvcCurrentPort, err = p.correspondingSRVSplit(ASvcCurrentPrefSRV)
 		if err != nil {
 			return
 		}
 	}
 	var SRVCrePrefSRV string
 	if SRVCreExists {
-		SRVCrePrefSRV, err = p.preferredSRVCombine(SRVCre.DNSName, SRVCre.RecordTTL, SRVCre.Targets[0])
+		SRVCrePrefSRV, err = p.correspondingSRVCombine(SRVCre.DNSName, SRVCre.RecordTTL, SRVCre.Targets[0])
 		if err != nil {
 			return
 		}
@@ -536,7 +535,7 @@ func (p *AWSSDProvider) SRVDetermineActions(host string, relCh *SRVRelevantChang
 					return
 				}
 				var SRVDelPrefSRV string
-				SRVDelPrefSRV, err = p.preferredSRVCombine(SRVDel.DNSName, SRVDel.RecordTTL, SRVDel.Targets[0])
+				SRVDelPrefSRV, err = p.correspondingSRVCombine(SRVDel.DNSName, SRVDel.RecordTTL, SRVDel.Targets[0])
 				if err != nil {
 					return
 				}
@@ -585,14 +584,14 @@ func (p *AWSSDProvider) submitCreates(namespaces []*sd.NamespaceSummary, changes
 		for _, ch := range changeList {
 			// skip SRV endpoints here. SRV endpoints are handled as part of A endpoints, and registered under an A+SRV service.
 			// skip endpoints with empty DNSName. These are empty endpoints, likley coming from SRV handleSRVChanges
-			if ch.RecordType == endpoint.RecordTypeSRV {
+			if ch.RecordType == endpoint.RecordTypeSRV || ch.DNSName == "" {
 				continue
 			}
 			_, srvName := p.parseHostname(ch.DNSName)
 
 			expectedDescr := ch.Labels[endpoint.AWSSDDescriptionLabel]
-			if prefSRV, ok := ch.Labels[labelPreferredSRV]; ok {
-				expectedDescr = prefSRV + "|" + expectedDescr
+			if corrSRV, ok := ch.Labels[labelCorrespondingSRV]; ok {
+				expectedDescr = corrSRV + "|" + expectedDescr
 			}
 
 			srv := services[srvName]
@@ -662,16 +661,16 @@ func (p *AWSSDProvider) DeleteSrvEp(ch *endpoint.Endpoint, svc *sd.Service) (err
 	if err != nil {
 		return
 	}
-	prefSrv, _, err := p.srvDescrSplit(aws.StringValue(svc.Description))
+	corrSrv, _, err := p.srvDescrSplit(aws.StringValue(svc.Description))
 	if err != nil {
 		return err
 	}
-	_, _, _, _, servicePort, err := p.preferredSRVSplit(prefSrv)
+	_, _, _, _, servicePort, err := p.correspondingSRVSplit(corrSrv)
 	if err != nil {
 		return err
 	}
 	if epProt != servicePort {
-		// if the port on the endpoint is different from the preferred port on the service, then the endpoint is stale and all instances with that port should be removed
+		// if the port on the endpoint is different from the corresponding port on the service, then the endpoint is stale and all instances with that port should be removed
 		// this happens when the port of a k8s NodePort is changed
 		instances, err := p.ListInstancesByServiceID(svc.Id)
 		if err != nil {
@@ -801,13 +800,13 @@ func (p *AWSSDProvider) CreateService(namespaceID *string, srvName *string, ep *
 		TTL:  aws.Int64(ttl),
 	}}
 
-	if prefSRV, ok := ep.Labels[labelPreferredSRV]; ok {
+	if corrSRV, ok := ep.Labels[labelCorrespondingSRV]; ok {
 		//when the service is A+SRV, then add the SRV-specific part
-		_, srvTtl, _, _, _, err := p.preferredSRVSplit(prefSRV)
+		_, srvTtl, _, _, _, err := p.correspondingSRVSplit(corrSRV)
 		if err != nil {
 			return nil, err
 		}
-		descr = prefSRV + "|" + descr
+		descr = corrSRV + "|" + descr
 		records = append(records, &sd.DnsRecord{
 			Type: aws.String(sd.RecordTypeSrv),
 			TTL:  aws.Int64(srvTtl),
@@ -852,13 +851,13 @@ func (p *AWSSDProvider) UpdateService(service *sd.Service, ep *endpoint.Endpoint
 		TTL:  aws.Int64(ttl),
 	}}
 
-	if prefSRV, ok := ep.Labels[labelPreferredSRV]; ok {
+	if corrSRV, ok := ep.Labels[labelCorrespondingSRV]; ok {
 		//when the service is A+SRV, then add the SRV-specific part
-		_, srvTtl, _, _, _, err := p.preferredSRVSplit(prefSRV)
+		_, srvTtl, _, _, _, err := p.correspondingSRVSplit(corrSRV)
 		if err != nil {
 			return err
 		}
-		descr = prefSRV + "|" + descr
+		descr = corrSRV + "|" + descr
 		records = append(records, &sd.DnsRecord{
 			Type: aws.String(sd.RecordTypeSrv),
 			TTL:  aws.Int64(srvTtl),
@@ -897,11 +896,11 @@ func (p *AWSSDProvider) RegisterInstance(service *sd.Service, ep *endpoint.Endpo
 		} else if ep.RecordType == endpoint.RecordTypeA {
 			attr[sdInstanceAttrIPV4] = aws.String(target)
 			if p.isAAndSRVService(service) {
-				prefSrv, _, err := p.srvDescrSplit(aws.StringValue(service.Description))
+				corrSrv, _, err := p.srvDescrSplit(aws.StringValue(service.Description))
 				if err != nil {
 					return err
 				}
-				_, _, _, _, port, err := p.preferredSRVSplit(prefSrv)
+				_, _, _, _, port, err := p.correspondingSRVSplit(corrSrv)
 				if err != nil {
 					return err
 				}
@@ -934,11 +933,11 @@ func (p *AWSSDProvider) DeregisterInstance(service *sd.Service, ep *endpoint.End
 
 		targetName := target
 		if p.isAAndSRVService(service) {
-			prefSrv, _, err := p.srvDescrSplit(aws.StringValue(service.Description))
+			corrSrv, _, err := p.srvDescrSplit(aws.StringValue(service.Description))
 			if err != nil {
 				return err
 			}
-			_, _, _, _, port, err := p.preferredSRVSplit(prefSrv)
+			_, _, _, _, port, err := p.correspondingSRVSplit(corrSrv)
 			if err != nil {
 				return err
 			}
@@ -1208,22 +1207,22 @@ func (p *AWSSDProvider) srvHostTargetSplit(target string) (port string, host str
 	return
 }
 
-func (p *AWSSDProvider) preferredSRVCombine(hostname string, ttl endpoint.TTL, target string) (prefSRV string, err error) {
+func (p *AWSSDProvider) correspondingSRVCombine(hostname string, ttl endpoint.TTL, target string) (corrSRV string, err error) {
 	port, _, prio, weight, err := p.srvHostTargetSplit(target)
 	if err != nil {
 		err = fmt.Errorf("endpoint target %s is not an host-based SRV target", target)
 		return
 	}
-	prefSRV = strings.Join([]string{hostname, strconv.Itoa(int(ttl)), "IN", "SRV", prio, weight, port}, " ")
+	corrSRV = strings.Join([]string{hostname, strconv.Itoa(int(ttl)), "IN", "SRV", prio, weight, port}, " ")
 	return
 }
 
-func (p *AWSSDProvider) preferredSRVSplit(prefSRV string) (hostname string, ttl int64, prio string, weight string, port string, err error) {
-	if !p.isPreferredSRV(prefSRV) {
-		err = fmt.Errorf("endpoint label %s is not an preferred SRV label", prefSRV)
+func (p *AWSSDProvider) correspondingSRVSplit(corrSRV string) (hostname string, ttl int64, prio string, weight string, port string, err error) {
+	if !p.isCorrespondingSRV(corrSRV) {
+		err = fmt.Errorf("endpoint label %s is not an corresponding SRV label", corrSRV)
 		return
 	}
-	parts := strings.Split(prefSRV, " ")
+	parts := strings.Split(corrSRV, " ")
 	hostname = parts[0]
 	ttl, err = strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
@@ -1235,13 +1234,13 @@ func (p *AWSSDProvider) preferredSRVSplit(prefSRV string) (hostname string, ttl 
 	return
 }
 
-func (p *AWSSDProvider) srvDescrSplit(descr string) (prefSrv string, AWSSDDescrLabel string, err error) {
+func (p *AWSSDProvider) srvDescrSplit(descr string) (corrSrv string, AWSSDDescrLabel string, err error) {
 	parts := strings.Split(descr, "|")
 	if len(parts) == 1 {
 		err = fmt.Errorf("description is not a valid SRV description: %s", descr)
 		return
 	}
-	prefSrv = parts[0]
+	corrSrv = parts[0]
 	AWSSDDescrLabel = strings.Join(parts[1:], "|")
 	return
 }
@@ -1250,8 +1249,8 @@ func (p *AWSSDProvider) isSrvHostTarget(target string) bool {
 	return sdSrvHostTargetRegex.MatchString(target)
 }
 
-func (p *AWSSDProvider) isPreferredSRV(target string) bool {
-	return sdPreferredSRVRegex.MatchString(target)
+func (p *AWSSDProvider) isCorrespondingSRV(target string) bool {
+	return sdCorrespondingSRVRegex.MatchString(target)
 }
 
 func sliceDedup(s []string) []string {
